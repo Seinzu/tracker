@@ -47,10 +47,78 @@ jobs:
           workspaces: |
             . -> target
 
+      - name: Configure macOS signing mode
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          required=(APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID KEYCHAIN_PASSWORD)
+          configured=0
+          missing=()
+
+          for name in "${required[@]}"; do
+            if [ -n "${!name}" ]; then
+              configured=$((configured + 1))
+            else
+              missing+=("$name")
+            fi
+          done
+
+          if [ "$configured" -eq 0 ]; then
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "MACOS_NOTARIZATION_ENABLED=false" >> "$GITHUB_ENV"
+            echo "::notice title=Ad-hoc macOS signing::Apple signing secrets are not configured, so this release will be ad-hoc signed and not notarized."
+          elif [ "$configured" -eq "${#required[@]}" ]; then
+            echo "MACOS_NOTARIZATION_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            for name in "${missing[@]}"; do
+              echo "::error title=Missing secret::$name is required when any Apple signing secret is configured."
+            done
+            exit 1
+          fi
+
+      - name: Import Apple Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          if [ "$MACOS_NOTARIZATION_ENABLED" != "true" ]; then
+            echo "Skipping Developer ID certificate import for ad-hoc signed build."
+            exit 0
+          fi
+
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security list-keychains -d user -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+
+          cert_info=$(security find-identity -v -p codesigning build.keychain | grep "Developer ID Application" | head -n 1)
+          if [ -z "$cert_info" ]; then
+            echo "::error title=Developer ID certificate not found::APPLE_CERTIFICATE must contain a Developer ID Application certificate exported as a base64 .p12."
+            security find-identity -v -p codesigning build.keychain
+            exit 1
+          fi
+
+          cert_name=$(echo "$cert_info" | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "APPLE_SIGNING_IDENTITY=$cert_name" >> "$GITHUB_ENV"
+
       - name: Build and upload Tauri bundles
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
         with:
           projectPath: .
           tagName: ${{ github.event.inputs.tag_name || github.ref_name }}
