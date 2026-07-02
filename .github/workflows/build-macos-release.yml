@@ -1,0 +1,63 @@
+name: Build macOS release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to create or update, such as v0.1.0"
+        required: true
+        default: "v0.1.0"
+      release_draft:
+        description: "Create or update the release as a draft"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: apple-silicon
+            target: aarch64-apple-darwin
+          - arch: intel
+            target: x86_64-apple-darwin
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Build and upload Tauri bundles
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: .
+          tagName: ${{ github.event.inputs.tag_name || github.ref_name }}
+          releaseName: "Tracker ${{ github.event.inputs.tag_name || github.ref_name }}"
+          releaseBody: "macOS builds are attached below."
+          # Tag pushes create draft releases so assets can be checked before publishing.
+          releaseDraft: ${{ github.event_name == 'push' || inputs.release_draft }}
+          prerelease: false
+          args: --target ${{ matrix.target }}
+          releaseAssetNamePattern: "[name]_[version]_[arch].[ext]"

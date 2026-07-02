@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tracker</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Tracker</h1>
+          <p id="activeMeta">No timer running</p>
+        </div>
+        <div class="timer-readout" aria-live="polite">
+          <span id="activeDuration">00:00:00</span>
+          <button id="stopButton" class="danger" disabled>Stop</button>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <aside class="task-panel" aria-label="Start a timer">
+          <form id="timerForm">
+            <label>
+              Task
+              <input id="taskName" name="taskName" list="taskNames" autocomplete="off" required />
+              <datalist id="taskNames"></datalist>
+            </label>
+
+            <div class="field-row">
+              <label>
+                Type
+                <select id="githubKind" name="githubKind">
+                  <option value="">General</option>
+                  <option value="issue">GitHub issue</option>
+                  <option value="pull_request">GitHub PR</option>
+                </select>
+              </label>
+              <label>
+                Reference
+                <input id="githubReference" name="githubReference" placeholder="owner/repo#123 or URL" />
+              </label>
+            </div>
+
+            <label id="githubTokenLabel" class="collapsible-field">
+              GitHub token
+              <input id="githubToken" name="githubToken" type="password" autocomplete="off" />
+            </label>
+
+            <div id="githubSearchStatus" class="search-status" aria-live="polite"></div>
+            <div id="githubSearchResults" class="search-results" hidden></div>
+
+            <label>
+              Subtask
+              <input id="subtaskName" name="subtaskName" autocomplete="off" placeholder="Design, review, implementation" />
+            </label>
+
+            <label>
+              Note
+              <textarea id="note" name="note" rows="3"></textarea>
+            </label>
+
+            <button class="primary" type="submit">Start timer</button>
+          </form>
+        </aside>
+
+        <section class="content-panel">
+          <nav class="tabs" aria-label="Views">
+            <button class="tab active" data-tab="recent" type="button">Recent</button>
+            <button class="tab" data-tab="reports" type="button">Reports</button>
+          </nav>
+
+          <section id="recentView" class="view active" aria-label="Recent time entries">
+            <table>
+              <thead>
+                <tr>
+                  <th>Task</th>
+                  <th>Subtask</th>
+                  <th>Reference</th>
+                  <th>Started</th>
+                  <th>Duration</th>
+                </tr>
+              </thead>
+              <tbody id="recentRows"></tbody>
+            </table>
+          </section>
+
+          <section id="reportsView" class="view" aria-label="Reports">
+            <table>
+              <thead>
+                <tr>
+                  <th>Task</th>
+                  <th>Subtask</th>
+                  <th>Reference</th>
+                  <th>Entries</th>
+                  <th>Total</th>
+                </tr>
+              </thead>
+              <tbody id="summaryRows"></tbody>
+            </table>
+          </section>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>
