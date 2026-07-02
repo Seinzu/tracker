@@ -48,6 +48,7 @@ jobs:
             . -> target
 
       - name: Configure macOS signing mode
+        id: signing-mode
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -69,11 +70,10 @@ jobs:
           done
 
           if [ "$configured" -eq 0 ]; then
-            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-            echo "MACOS_NOTARIZATION_ENABLED=false" >> "$GITHUB_ENV"
+            echo "notarize=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Ad-hoc macOS signing::Apple signing secrets are not configured, so this release will be ad-hoc signed and not notarized."
           elif [ "$configured" -eq "${#required[@]}" ]; then
-            echo "MACOS_NOTARIZATION_ENABLED=true" >> "$GITHUB_ENV"
+            echo "notarize=true" >> "$GITHUB_OUTPUT"
           else
             for name in "${missing[@]}"; do
               echo "::error title=Missing secret::$name is required when any Apple signing secret is configured."
@@ -82,16 +82,12 @@ jobs:
           fi
 
       - name: Import Apple Developer ID certificate
+        if: steps.signing-mode.outputs.notarize == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
-          if [ "$MACOS_NOTARIZATION_ENABLED" != "true" ]; then
-            echo "Skipping Developer ID certificate import for ad-hoc signed build."
-            exit 0
-          fi
-
           echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
           security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
           security default-keychain -s build.keychain
@@ -111,7 +107,25 @@ jobs:
           cert_name=$(echo "$cert_info" | sed -E 's/.*"([^"]+)".*/\1/')
           echo "APPLE_SIGNING_IDENTITY=$cert_name" >> "$GITHUB_ENV"
 
-      - name: Build and upload Tauri bundles
+      - name: Build and upload ad-hoc signed Tauri bundles
+        if: steps.signing-mode.outputs.notarize == 'false'
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: "-"
+        with:
+          projectPath: .
+          tagName: ${{ github.event.inputs.tag_name || github.ref_name }}
+          releaseName: "Tracker ${{ github.event.inputs.tag_name || github.ref_name }}"
+          releaseBody: "macOS builds are attached below. These artifacts are ad-hoc signed and not notarized."
+          # Tag pushes create draft releases so assets can be checked before publishing.
+          releaseDraft: ${{ github.event_name == 'push' || inputs.release_draft }}
+          prerelease: false
+          args: --target ${{ matrix.target }}
+          releaseAssetNamePattern: "[name]_[version]_[arch].[ext]"
+
+      - name: Build, notarize, and upload Tauri bundles
+        if: steps.signing-mode.outputs.notarize == 'true'
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
