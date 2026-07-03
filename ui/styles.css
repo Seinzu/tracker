@@ -133,14 +133,6 @@ textarea {
   grid-template-columns: 130px minmax(0, 1fr);
 }
 
-.collapsible-field {
-  display: none;
-}
-
-.collapsible-field.visible {
-  display: grid;
-}
-
 .search-status {
   color: #747c80;
   font-size: 12px;
@@ -191,6 +183,65 @@ textarea {
   background: #b94235;
   color: #ffffff;
   font-weight: 700;
+}
+
+.secondary {
+  background: #d9d3c8;
+  color: #202426;
+  font-weight: 700;
+}
+
+.ghost {
+  background: transparent;
+  color: inherit;
+  min-height: 32px;
+  padding: 0 6px;
+}
+
+.dialog-backdrop {
+  align-items: center;
+  background: rgba(20, 24, 25, 0.42);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 20;
+}
+
+.dialog-backdrop[hidden] {
+  display: none;
+}
+
+.dialog {
+  background: #fffefa;
+  border: 1px solid #d4cec2;
+  border-radius: 8px;
+  box-shadow: 0 24px 70px rgba(25, 35, 40, 0.24);
+  display: grid;
+  gap: 18px;
+  max-width: 440px;
+  padding: 18px;
+  width: min(100%, 440px);
+}
+
+.dialog-header,
+.dialog-actions {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.dialog h2 {
+  font-size: 18px;
+  margin: 0;
+}
+
+.dialog-status {
+  color: #747c80;
+  font-size: 13px;
+  min-height: 18px;
 }
 
 .content-panel {
@@ -321,6 +372,16 @@ td {
     background: #1f2425;
     border-color: #343b3b;
     color: #eef0eb;
+  }
+
+  .secondary {
+    background: #343b3b;
+    color: #eef0eb;
+  }
+
+  .dialog {
+    background: #1f2425;
+    border-color: #343b3b;
   }
 
   .task-panel,

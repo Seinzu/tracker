@@ -8,10 +8,14 @@ const timerForm = document.querySelector("#timerForm");
 const taskName = document.querySelector("#taskName");
 const githubKind = document.querySelector("#githubKind");
 const githubReference = document.querySelector("#githubReference");
-const githubTokenLabel = document.querySelector("#githubTokenLabel");
-const githubToken = document.querySelector("#githubToken");
 const githubSearchStatus = document.querySelector("#githubSearchStatus");
 const githubSearchResults = document.querySelector("#githubSearchResults");
+const githubTokenDialog = document.querySelector("#githubTokenDialog");
+const githubToken = document.querySelector("#githubToken");
+const githubTokenClose = document.querySelector("#githubTokenClose");
+const githubTokenClear = document.querySelector("#githubTokenClear");
+const githubTokenSave = document.querySelector("#githubTokenSave");
+const githubTokenStatus = document.querySelector("#githubTokenStatus");
 const subtaskName = document.querySelector("#subtaskName");
 const note = document.querySelector("#note");
 const taskNames = document.querySelector("#taskNames");
@@ -24,7 +28,6 @@ let activeTimer = null;
 let tickHandle = null;
 let githubSearchHandle = null;
 let githubSearchRequest = 0;
-let githubTokenSaveHandle = null;
 
 function formatDuration(seconds) {
   const value = Math.max(0, Math.floor(seconds));
@@ -135,7 +138,6 @@ function isGithubReferenceKind() {
 }
 
 function updateGithubControls() {
-  githubTokenLabel.classList.toggle("visible", isGithubReferenceKind());
   if (isGithubReferenceKind()) {
     scheduleGithubSearch();
     return;
@@ -229,18 +231,6 @@ async function loadGithubToken() {
   window.localStorage.removeItem(LEGACY_GITHUB_TOKEN_STORAGE_KEY);
 }
 
-function scheduleGithubTokenSave() {
-  window.clearTimeout(githubTokenSaveHandle);
-  githubSearchRequest += 1;
-  githubSearchResults.hidden = true;
-  githubSearchResults.innerHTML = "";
-  githubSearchStatus.textContent = githubToken.value.trim()
-    ? "Saving GitHub token..."
-    : "Clearing GitHub token...";
-
-  githubTokenSaveHandle = window.setTimeout(saveGithubToken, 450);
-}
-
 async function saveGithubToken() {
   try {
     await invoke("set_github_token", {
@@ -249,13 +239,30 @@ async function saveGithubToken() {
       },
     });
 
-    githubSearchStatus.textContent = githubToken.value.trim()
+    githubTokenStatus.textContent = githubToken.value.trim()
       ? "GitHub token saved."
       : "GitHub token cleared.";
     scheduleGithubSearch();
   } catch (error) {
-    githubSearchStatus.textContent = String(error);
+    githubTokenStatus.textContent = String(error);
   }
+}
+
+async function openGithubTokenDialog() {
+  await loadGithubToken();
+  githubTokenStatus.textContent = "";
+  githubTokenDialog.hidden = false;
+  githubToken.focus();
+  githubToken.select();
+}
+
+function closeGithubTokenDialog() {
+  githubTokenDialog.hidden = true;
+}
+
+async function clearGithubToken() {
+  githubToken.value = "";
+  await saveGithubToken();
 }
 
 async function refresh() {
@@ -312,9 +319,18 @@ document.querySelectorAll(".tab").forEach((tab) => {
 
 githubKind.addEventListener("change", updateGithubControls);
 githubReference.addEventListener("input", scheduleGithubSearch);
-githubToken.addEventListener("input", scheduleGithubTokenSave);
+githubTokenSave.addEventListener("click", saveGithubToken);
+githubTokenClear.addEventListener("click", clearGithubToken);
+githubTokenClose.addEventListener("click", closeGithubTokenDialog);
+githubTokenDialog.addEventListener("click", (event) => {
+  if (event.target === githubTokenDialog) closeGithubTokenDialog();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !githubTokenDialog.hidden) closeGithubTokenDialog();
+});
 
 await listen("timer-updated", refresh);
+await listen("open-github-token-settings", openGithubTokenDialog);
 await loadGithubToken();
 updateGithubControls();
 await refresh();

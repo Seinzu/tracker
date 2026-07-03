@@ -6,13 +6,15 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
-use tauri::menu::{Menu, MenuBuilder};
+use tauri::menu::{Menu, MenuBuilder, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State};
 use thiserror::Error;
 
 const TRAY_ID: &str = "tracker-tray";
 const TRAY_TASK_PREFIX: &str = "start-task:";
+const MENU_GITHUB_TOKEN_ID: &str = "github-token-settings";
+const MENU_SHOW_ID: &str = "show-tracker";
 const GITHUB_KEYCHAIN_SERVICE: &str = "dev.local.tracker";
 const GITHUB_KEYCHAIN_USER: &str = "github-token";
 
@@ -251,8 +253,17 @@ pub fn run() {
             };
             configure_database(&state.connect()?)?;
             app.manage(state);
+            build_app_menu(app.handle())?;
             build_tray(app.handle())?;
             Ok(())
+        })
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            MENU_GITHUB_TOKEN_ID => {
+                show_main_window(app);
+                let _ = app.emit("open-github-token-settings", ());
+            }
+            MENU_SHOW_ID => show_main_window(app),
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             list_tasks,
@@ -267,6 +278,41 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tracker");
+}
+
+fn build_app_menu(app: &AppHandle) -> Result<(), TrackerError> {
+    let app_menu = SubmenuBuilder::new(app, "Tracker")
+        .about(None)
+        .separator()
+        .text(MENU_GITHUB_TOKEN_ID, "GitHub Token...")
+        .text(MENU_SHOW_ID, "Show Tracker")
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+
+    let view_menu = SubmenuBuilder::new(app, "View").fullscreen().build()?;
+    let window_menu = SubmenuBuilder::new(app, "Window")
+        .minimize()
+        .close_window()
+        .build()?;
+
+    let menu = Menu::with_items(app, &[&app_menu, &edit_menu, &view_menu, &window_menu])?;
+    app.set_menu(menu)?;
+    Ok(())
 }
 
 fn build_tray(app: &AppHandle) -> Result<(), TrackerError> {
