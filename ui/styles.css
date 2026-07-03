@@ -434,8 +434,28 @@ td {
 
 @media (prefers-color-scheme: dark) {
   :root {
-    background: #151819;
-    color: #eef0eb;
+    background: #0f1416;
+    color: #f4f1e8;
+  }
+
+  body {
+    background: #0f1416;
+  }
+
+  .topbar {
+    background: #111b20;
+  }
+
+  .topbar p {
+    color: #c9d7d5;
+  }
+
+  button:disabled {
+    opacity: 0.68;
+  }
+
+  label {
+    color: #dce4e1;
   }
 
   .task-panel,
@@ -444,77 +464,119 @@ td {
   .tab.active,
   th,
   td {
-    background: #1f2425;
+    background: #1c2528;
   }
 
   .tabs {
-    background: #171b1c;
-    border-color: #343b3b;
+    background: #12191c;
+    border-color: #3f4d51;
+  }
+
+  .tab {
+    color: #c2cfcc;
+  }
+
+  .tab.active {
+    color: #f4f1e8;
   }
 
   .report-toolbar {
-    border-color: #343b3b;
+    border-color: #3f4d51;
   }
 
   .segmented-control {
-    background: #171b1c;
-    border-color: #343b3b;
+    background: #101719;
+    border-color: #516166;
   }
 
   .segment {
-    color: #cbd0cd;
+    color: #cbd8d5;
   }
 
   .segment.active {
-    color: #eef0eb;
-    box-shadow: none;
+    background: #2a363a;
+    color: #f7f5ee;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.36);
   }
 
   input,
   select,
   textarea {
-    background: #151819;
-    border-color: #3d4646;
-    color: #eef0eb;
+    background: #11181b;
+    border-color: #607176;
+    color: #f4f1e8;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: #98a8a6;
+  }
+
+  input:focus,
+  select:focus,
+  textarea:focus {
+    border-color: #86b9b3;
+    outline: 2px solid rgba(134, 185, 179, 0.28);
+    outline-offset: 1px;
   }
 
   .search-results {
-    border-color: #343b3b;
+    border-color: #46565b;
   }
 
   .search-result {
-    background: #1f2425;
-    border-color: #343b3b;
-    color: #eef0eb;
+    background: #1c2528;
+    border-color: #3f4d51;
+    color: #f4f1e8;
+  }
+
+  .search-status,
+  .dialog-status,
+  .search-result span,
+  .muted {
+    color: #aebbb8;
   }
 
   .secondary {
-    background: #343b3b;
-    color: #eef0eb;
+    background: #465357;
+    color: #f7f5ee;
   }
 
   .choice-button {
-    background: #171b1c;
-    color: #eef0eb;
+    background: #202b2f;
+    border: 1px solid #49595e;
+    color: #edf2ef;
   }
 
   .choice-button.active {
-    background: #25615f;
+    background: #2f7773;
+    border-color: #4ca09a;
   }
 
   .choice-button:disabled {
-    background: #242a2b;
-    color: #707879;
+    background: #1b2326;
+    border-color: #303b3f;
+    color: #9ca9a6;
+    opacity: 1;
   }
 
   .dialog {
-    background: #1f2425;
-    border-color: #343b3b;
+    background: #1c2528;
+    border-color: #516166;
+    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.52);
   }
 
   .task-panel,
   th,
   td {
-    border-color: #343b3b;
+    border-color: #3f4d51;
+  }
+
+  .task-panel {
+    border-color: #3f4d51;
+  }
+
+  th {
+    color: #bfcbc8;
   }
 }
