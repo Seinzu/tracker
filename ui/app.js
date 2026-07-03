@@ -22,6 +22,9 @@ const subtaskName = document.querySelector("#subtaskName");
 const note = document.querySelector("#note");
 const recentRows = document.querySelector("#recentRows");
 const summaryRows = document.querySelector("#summaryRows");
+const summarySubtaskHeader = document.querySelector("#summarySubtaskHeader");
+const reportTaskMode = document.querySelector("#reportTaskMode");
+const reportSubtaskMode = document.querySelector("#reportSubtaskMode");
 const createTaskDialog = document.querySelector("#createTaskDialog");
 const createTaskClose = document.querySelector("#createTaskClose");
 const createTaskCancel = document.querySelector("#createTaskCancel");
@@ -48,6 +51,9 @@ let createTaskMode = "free";
 let createImportSearchHandle = null;
 let createImportSearchRequest = 0;
 let hasGithubToken = false;
+let reportMode = "task";
+let taskSummaryRows = [];
+let subtaskSummaryRows = [];
 
 function formatDuration(seconds) {
   const value = Math.max(0, Math.floor(seconds));
@@ -124,6 +130,10 @@ function selectedTaskItem() {
   return taskItems.find((item) => String(item.task.id) === taskSelect.value) ?? null;
 }
 
+function subtasksForTask(taskId) {
+  return taskItems.find((item) => item.task.id === taskId)?.subtasks ?? [];
+}
+
 function updateSelectedTaskDetails() {
   const selected = selectedTaskItem();
   startTimerButton.disabled = !selected;
@@ -149,21 +159,80 @@ function renderRecent(entries) {
 
   for (const entry of entries) {
     const row = document.createElement("tr");
+    const subtaskCell = document.createElement("td");
+    const subtaskEditor = document.createElement("div");
+    const subtaskInput = document.createElement("input");
+    const saveSubtask = document.createElement("button");
+    const listId = `subtasks-${entry.id}`;
+
+    subtaskCell.className = "subtask-edit-cell";
+    subtaskEditor.className = "inline-edit";
+    subtaskInput.type = "text";
+    subtaskInput.value = entry.subtaskName ?? "";
+    subtaskInput.placeholder = "No subtask";
+    subtaskInput.setAttribute("aria-label", `Subtask for ${entry.taskName}`);
+    subtaskInput.setAttribute("list", listId);
+    saveSubtask.type = "button";
+    saveSubtask.className = "secondary compact";
+    saveSubtask.textContent = "Save";
+    saveSubtask.disabled = true;
+
+    const datalist = document.createElement("datalist");
+    datalist.id = listId;
+    for (const subtask of subtasksForTask(entry.taskId)) {
+      const option = document.createElement("option");
+      option.value = subtask.name;
+      datalist.append(option);
+    }
+
+    const syncSaveState = () => {
+      saveSubtask.disabled = subtaskInput.value.trim() === (entry.subtaskName ?? "");
+    };
+    const save = async () => {
+      if (saveSubtask.disabled) return;
+      saveSubtask.disabled = true;
+      saveSubtask.textContent = "Saving";
+      try {
+        await updateEntrySubtask(entry.id, subtaskInput.value);
+      } catch (error) {
+        saveSubtask.textContent = "Retry";
+        saveSubtask.disabled = false;
+        console.error(error);
+      }
+    };
+
+    subtaskInput.addEventListener("input", syncSaveState);
+    subtaskInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        save();
+      }
+    });
+    saveSubtask.addEventListener("click", save);
+    subtaskEditor.append(subtaskInput, saveSubtask, datalist);
+    subtaskCell.append(subtaskEditor);
+
     row.innerHTML = `
       <td>${escapeHtml(entry.taskName)}</td>
-      <td class="muted">${escapeHtml(entry.subtaskName ?? "")}</td>
       <td class="muted">${escapeHtml(referenceLabel(entry))}</td>
       <td>${formatDate(entry.startedAt)}</td>
       <td class="mono">${formatDuration(entry.durationSeconds)}</td>
     `;
+    row.children[0].after(subtaskCell);
     recentRows.append(row);
   }
 }
 
-function renderSummary(rows) {
+function renderSummary() {
+  const isDetailed = reportMode === "subtask";
+  const rows = isDetailed ? subtaskSummaryRows : taskSummaryRows;
+  summarySubtaskHeader.hidden = !isDetailed;
+  reportTaskMode.classList.toggle("active", !isDetailed);
+  reportSubtaskMode.classList.toggle("active", isDetailed);
   summaryRows.innerHTML = "";
+
   if (!rows.length) {
-    summaryRows.innerHTML = `<tr><td colspan="5" class="muted">No report data yet.</td></tr>`;
+    summaryRows.innerHTML = `<tr><td colspan="${isDetailed ? 5 : 4}" class="muted">No report data yet.</td></tr>`;
     return;
   }
 
@@ -171,13 +240,18 @@ function renderSummary(rows) {
     const row = document.createElement("tr");
     row.innerHTML = `
       <td>${escapeHtml(item.taskName)}</td>
-      <td class="muted">${escapeHtml(item.subtaskName ?? "")}</td>
+      ${isDetailed ? `<td class="muted">${escapeHtml(item.subtaskName ?? "No subtask")}</td>` : ""}
       <td class="muted">${escapeHtml(referenceLabel(item))}</td>
       <td class="mono">${item.entryCount}</td>
       <td class="mono">${formatDuration(item.totalSeconds)}</td>
     `;
     summaryRows.append(row);
   }
+}
+
+function setReportMode(mode) {
+  reportMode = mode;
+  renderSummary();
 }
 
 function escapeHtml(value) {
@@ -382,6 +456,16 @@ async function persistCreatedTask(task) {
   closeCreateTaskDialog();
 }
 
+async function updateEntrySubtask(entryId, subtaskName) {
+  await invoke("update_time_entry_subtask", {
+    input: {
+      entryId,
+      subtaskName: subtaskName.trim() || null,
+    },
+  });
+  await refresh();
+}
+
 async function createFreeTextTask() {
   const name = freeTaskName.value.trim();
   if (!name) {
@@ -473,18 +557,21 @@ function renderCreateImportResults(results) {
 }
 
 async function refresh() {
-  const [tasks, active, entries, summary] = await Promise.all([
+  const [tasks, active, entries, taskSummary, subtaskSummary] = await Promise.all([
     invoke("list_tasks"),
     invoke("get_active_timer"),
     invoke("recent_entries", { limit: 50 }),
     invoke("summary_by_task"),
+    invoke("summary_by_subtask"),
   ]);
 
   activeTimer = active;
+  taskSummaryRows = taskSummary;
+  subtaskSummaryRows = subtaskSummary;
   renderTaskOptions(tasks);
   renderActiveTimer();
   renderRecent(entries);
-  renderSummary(summary);
+  renderSummary();
 }
 
 timerForm.addEventListener("submit", async (event) => {
@@ -518,6 +605,8 @@ timerForm.addEventListener("submit", async (event) => {
 
 taskSelect.addEventListener("change", updateSelectedTaskDetails);
 createTaskButton.addEventListener("click", openCreateTaskDialog);
+reportTaskMode.addEventListener("click", () => setReportMode("task"));
+reportSubtaskMode.addEventListener("click", () => setReportMode("subtask"));
 stopButton.addEventListener("click", async () => {
   await invoke("stop_timer");
   await refresh();

@@ -98,6 +98,13 @@ struct StartTimerInput {
     note: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateEntrySubtaskInput {
+    entry_id: i64,
+    subtask_name: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ActiveTimer {
@@ -230,9 +237,26 @@ fn recent_entries(
 }
 
 #[tauri::command]
+fn update_time_entry_subtask(
+    state: State<'_, AppState>,
+    input: UpdateEntrySubtaskInput,
+    app: AppHandle,
+) -> Result<TimeEntryView, String> {
+    let entry = update_time_entry_subtask_inner(&state, input).map_err(String::from)?;
+    let _ = app.emit("timer-updated", ());
+    Ok(entry)
+}
+
+#[tauri::command]
 fn summary_by_task(state: State<'_, AppState>) -> Result<Vec<SummaryRow>, String> {
     let conn = state.connect().map_err(String::from)?;
     summary_by_task_inner(&conn).map_err(String::from)
+}
+
+#[tauri::command]
+fn summary_by_subtask(state: State<'_, AppState>) -> Result<Vec<SummaryRow>, String> {
+    let conn = state.connect().map_err(String::from)?;
+    summary_by_subtask_inner(&conn).map_err(String::from)
 }
 
 #[tauri::command]
@@ -284,7 +308,9 @@ pub fn run() {
             stop_timer,
             get_active_timer,
             recent_entries,
+            update_time_entry_subtask,
             summary_by_task,
+            summary_by_subtask,
             search_github_references,
             get_github_token,
             set_github_token
@@ -711,6 +737,7 @@ fn start_existing_task_inner(
 ) -> Result<ActiveTimer, TrackerError> {
     let conn = state.connect()?;
     let task = task_by_id_conn(&conn, task_id)?;
+    let subtask_name = latest_subtask_name_for_task(&conn, task_id)?;
     drop(conn);
 
     start_timer_inner(
@@ -721,7 +748,7 @@ fn start_existing_task_inner(
                 github_kind: task.github_kind,
                 github_reference: task.github_reference,
             },
-            subtask_name: None,
+            subtask_name,
             note: None,
         },
     )
@@ -794,7 +821,64 @@ fn recent_entries_inner(conn: &Connection, limit: i64) -> Result<Vec<TimeEntryVi
     collect_rows(rows)
 }
 
+fn update_time_entry_subtask_inner(
+    state: &State<'_, AppState>,
+    input: UpdateEntrySubtaskInput,
+) -> Result<TimeEntryView, TrackerError> {
+    let mut conn = state.connect()?;
+    let entry_id = input.entry_id;
+
+    {
+        let tx = conn.transaction()?;
+        let task_id: i64 = tx.query_row(
+            "SELECT task_id FROM time_entries WHERE id = ?1",
+            params![entry_id],
+            |row| row.get(0),
+        )?;
+        let now = now_string();
+        let subtask_id = match normalize_optional(input.subtask_name) {
+            Some(name) => Some(upsert_subtask(&tx, task_id, &name, &now)?.id),
+            None => None,
+        };
+
+        tx.execute(
+            "UPDATE time_entries SET subtask_id = ?1 WHERE id = ?2",
+            params![subtask_id, entry_id],
+        )?;
+        tx.commit()?;
+    }
+
+    entry_view_by_id(&conn, entry_id)
+}
+
 fn summary_by_task_inner(conn: &Connection) -> Result<Vec<SummaryRow>, TrackerError> {
+    let entries = recent_entries_inner(conn, 10_000)?;
+    let mut rows: Vec<SummaryRow> = Vec::new();
+
+    for entry in entries {
+        if let Some(row) = rows.iter_mut().find(|row| row.task_id == entry.task_id) {
+            row.total_seconds += entry.duration_seconds;
+            row.entry_count += 1;
+            continue;
+        }
+
+        rows.push(SummaryRow {
+            task_id: entry.task_id,
+            task_name: entry.task_name,
+            subtask_id: None,
+            subtask_name: None,
+            github_kind: entry.github_kind,
+            github_reference: entry.github_reference,
+            total_seconds: entry.duration_seconds,
+            entry_count: 1,
+        });
+    }
+
+    rows.sort_by(|a, b| b.total_seconds.cmp(&a.total_seconds));
+    Ok(rows)
+}
+
+fn summary_by_subtask_inner(conn: &Connection) -> Result<Vec<SummaryRow>, TrackerError> {
     let entries = recent_entries_inner(conn, 10_000)?;
     let mut rows: Vec<SummaryRow> = Vec::new();
 
@@ -820,7 +904,11 @@ fn summary_by_task_inner(conn: &Connection) -> Result<Vec<SummaryRow>, TrackerEr
         });
     }
 
-    rows.sort_by(|a, b| b.total_seconds.cmp(&a.total_seconds));
+    rows.sort_by(|a, b| {
+        a.task_name
+            .cmp(&b.task_name)
+            .then_with(|| b.total_seconds.cmp(&a.total_seconds))
+    });
     Ok(rows)
 }
 
@@ -890,6 +978,27 @@ fn subtasks_for_task(conn: &Connection, task_id: i64) -> Result<Vec<Subtask>, Tr
     })?;
 
     collect_rows(rows)
+}
+
+fn latest_subtask_name_for_task(
+    conn: &Connection,
+    task_id: i64,
+) -> Result<Option<String>, TrackerError> {
+    conn.query_row(
+        "
+        SELECT s.name
+        FROM time_entries e
+        LEFT JOIN subtasks s ON s.id = e.subtask_id
+        WHERE e.task_id = ?1
+        ORDER BY e.started_at DESC
+        LIMIT 1
+        ",
+        params![task_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(TrackerError::from)
 }
 
 fn upsert_task(tx: &Transaction<'_>, input: &TaskInput, now: &str) -> Result<Task, TrackerError> {

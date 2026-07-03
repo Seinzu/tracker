@@ -197,6 +197,11 @@ textarea {
   font-weight: 700;
 }
 
+.compact {
+  min-height: 34px;
+  padding: 0 10px;
+}
+
 .ghost {
   background: transparent;
   color: inherit;
@@ -329,6 +334,39 @@ textarea {
   display: block;
 }
 
+.report-toolbar {
+  align-items: center;
+  background: #fdfcf8;
+  border-bottom: 1px solid #e4dfd5;
+  display: flex;
+  justify-content: flex-end;
+  min-height: 54px;
+  padding: 10px 16px;
+}
+
+.segmented-control {
+  background: #ece7de;
+  border: 1px solid #d4cec2;
+  border-radius: 7px;
+  display: inline-grid;
+  gap: 2px;
+  grid-template-columns: repeat(2, minmax(90px, 1fr));
+  padding: 3px;
+}
+
+.segment {
+  background: transparent;
+  color: #495156;
+  font-weight: 700;
+  min-height: 32px;
+}
+
+.segment.active {
+  background: #ffffff;
+  color: #202426;
+  box-shadow: 0 1px 3px rgba(25, 35, 40, 0.12);
+}
+
 table {
   border-collapse: collapse;
   width: 100%;
@@ -353,6 +391,22 @@ th {
 
 td {
   background: #fffefa;
+}
+
+.subtask-edit-cell {
+  min-width: 220px;
+}
+
+.inline-edit {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(120px, 1fr) auto;
+}
+
+.inline-edit input {
+  min-height: 34px;
+  padding: 6px 8px;
 }
 
 .muted {
@@ -391,6 +445,8 @@ td {
   }
 
   .task-panel,
+  .report-toolbar,
+  .segment.active,
   .tab.active,
   th,
   td {
@@ -400,6 +456,24 @@ td {
   .tabs {
     background: #171b1c;
     border-color: #343b3b;
+  }
+
+  .report-toolbar {
+    border-color: #343b3b;
+  }
+
+  .segmented-control {
+    background: #171b1c;
+    border-color: #343b3b;
+  }
+
+  .segment {
+    color: #cbd0cd;
+  }
+
+  .segment.active {
+    color: #eef0eb;
+    box-shadow: none;
   }
 
   input,
