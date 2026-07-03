@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Tracker deer tracks logo">
+  <rect x="24" y="24" width="464" height="464" rx="104" fill="#f6f4ef"/>
+  <rect x="24" y="24" width="464" height="464" rx="104" fill="none" stroke="#d8d1c5" stroke-width="10"/>
+
+  <g fill="#192328">
+    <g transform="translate(194 344) rotate(-18) scale(0.86)">
+      <path d="M -34 -94 C -8 -88 6 -52 2 -13 C -2 37 -17 82 -43 84 C -68 86 -76 37 -69 -15 C -64 -53 -54 -86 -34 -94 Z"/>
+      <path d="M 34 -94 C 8 -88 -6 -52 -2 -13 C 2 37 17 82 43 84 C 68 86 76 37 69 -15 C 64 -53 54 -86 34 -94 Z"/>
+      <ellipse cx="-52" cy="112" rx="13" ry="19"/>
+      <ellipse cx="52" cy="112" rx="13" ry="19"/>
+    </g>
+
+    <g transform="translate(318 172) rotate(-18) scale(0.86)">
+      <path d="M -34 -94 C -8 -88 6 -52 2 -13 C -2 37 -17 82 -43 84 C -68 86 -76 37 -69 -15 C -64 -53 -54 -86 -34 -94 Z"/>
+      <path d="M 34 -94 C 8 -88 -6 -52 -2 -13 C 2 37 17 82 43 84 C 68 86 76 37 69 -15 C 64 -53 54 -86 34 -94 Z"/>
+      <ellipse cx="-52" cy="112" rx="13" ry="19"/>
+      <ellipse cx="52" cy="112" rx="13" ry="19"/>
+    </g>
+  </g>
+</svg>
