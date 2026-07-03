@@ -133,6 +133,12 @@ textarea {
   grid-template-columns: 130px minmax(0, 1fr);
 }
 
+.task-picker {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .search-status {
   color: #747c80;
   font-size: 12px;
@@ -225,6 +231,11 @@ textarea {
   width: min(100%, 440px);
 }
 
+.dialog-wide {
+  max-width: 560px;
+  width: min(100%, 560px);
+}
+
 .dialog-header,
 .dialog-actions {
   align-items: center;
@@ -242,6 +253,41 @@ textarea {
   color: #747c80;
   font-size: 13px;
   min-height: 18px;
+}
+
+.dialog-choices {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.choice-button {
+  background: #ece7de;
+  color: #202426;
+  font-size: 13px;
+  font-weight: 700;
+  min-height: 48px;
+  padding: 8px 10px;
+  white-space: normal;
+}
+
+.choice-button.active {
+  background: #25615f;
+  color: #ffffff;
+}
+
+.choice-button:disabled {
+  background: #e4dfd5;
+  color: #85817a;
+}
+
+.create-task-panel {
+  display: none;
+  gap: 16px;
+}
+
+.create-task-panel.active {
+  display: grid;
 }
 
 .content-panel {
@@ -377,6 +423,20 @@ td {
   .secondary {
     background: #343b3b;
     color: #eef0eb;
+  }
+
+  .choice-button {
+    background: #171b1c;
+    color: #eef0eb;
+  }
+
+  .choice-button.active {
+    background: #25615f;
+  }
+
+  .choice-button:disabled {
+    background: #242a2b;
+    color: #707879;
   }
 
   .dialog {

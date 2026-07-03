@@ -184,6 +184,18 @@ fn list_tasks(state: State<'_, AppState>) -> Result<Vec<TaskWithSubtasks>, Strin
 }
 
 #[tauri::command]
+fn create_task(
+    state: State<'_, AppState>,
+    input: TaskInput,
+    app: AppHandle,
+) -> Result<TaskWithSubtasks, String> {
+    let created = create_task_inner(&state, input).map_err(String::from)?;
+    let _ = refresh_tray_menu(&app);
+    let _ = app.emit("tasks-updated", ());
+    Ok(created)
+}
+
+#[tauri::command]
 fn start_timer(
     state: State<'_, AppState>,
     input: StartTimerInput,
@@ -267,6 +279,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_tasks,
+            create_task,
             start_timer,
             stop_timer,
             get_active_timer,
@@ -607,6 +620,23 @@ fn configure_database(conn: &Connection) -> Result<(), TrackerError> {
     )?;
 
     Ok(())
+}
+
+fn create_task_inner(
+    state: &State<'_, AppState>,
+    input: TaskInput,
+) -> Result<TaskWithSubtasks, TrackerError> {
+    let mut conn = state.connect()?;
+    let tx = conn.transaction()?;
+    let now = now_string();
+    let task = upsert_task(&tx, &input, &now)?;
+    tx.commit()?;
+
+    let conn = state.connect()?;
+    Ok(TaskWithSubtasks {
+        subtasks: subtasks_for_task(&conn, task.id)?,
+        task,
+    })
 }
 
 fn start_timer_inner(
