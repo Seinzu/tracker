@@ -127,12 +127,6 @@ textarea {
   resize: vertical;
 }
 
-.field-row {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: 130px minmax(0, 1fr);
-}
-
 .task-picker {
   display: grid;
   gap: 8px;

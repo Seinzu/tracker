@@ -8,10 +8,6 @@ const timerForm = document.querySelector("#timerForm");
 const startTimerButton = document.querySelector("#startTimerButton");
 const taskSelect = document.querySelector("#taskSelect");
 const createTaskButton = document.querySelector("#createTaskButton");
-const githubKind = document.querySelector("#githubKind");
-const githubReference = document.querySelector("#githubReference");
-const githubSearchStatus = document.querySelector("#githubSearchStatus");
-const githubSearchResults = document.querySelector("#githubSearchResults");
 const githubTokenDialog = document.querySelector("#githubTokenDialog");
 const githubToken = document.querySelector("#githubToken");
 const githubTokenClose = document.querySelector("#githubTokenClose");
@@ -45,8 +41,6 @@ let activeTimer = null;
 let taskItems = [];
 let pendingSelectedTaskId = null;
 let tickHandle = null;
-let githubSearchHandle = null;
-let githubSearchRequest = 0;
 let createTaskMode = "free";
 let createImportSearchHandle = null;
 let createImportSearchRequest = 0;
@@ -137,17 +131,6 @@ function subtasksForTask(taskId) {
 function updateSelectedTaskDetails() {
   const selected = selectedTaskItem();
   startTimerButton.disabled = !selected;
-
-  if (!selected) {
-    githubKind.value = "";
-    githubReference.value = "";
-    updateGithubControls();
-    return;
-  }
-
-  githubKind.value = selected.task.githubKind ?? "";
-  githubReference.value = selected.task.githubReference ?? "";
-  updateGithubControls();
 }
 
 function renderRecent(entries) {
@@ -263,89 +246,6 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function isGithubReferenceKind() {
-  return githubKind.value === "issue" || githubKind.value === "pull_request";
-}
-
-function updateGithubControls() {
-  if (isGithubReferenceKind()) {
-    scheduleGithubSearch();
-    return;
-  }
-
-  githubSearchStatus.textContent = "";
-  githubSearchResults.hidden = true;
-  githubSearchResults.innerHTML = "";
-}
-
-function scheduleGithubSearch() {
-  window.clearTimeout(githubSearchHandle);
-  const query = githubReference.value.trim();
-
-  if (!isGithubReferenceKind() || query.length < 3) {
-    githubSearchRequest += 1;
-    githubSearchStatus.textContent = "";
-    githubSearchResults.hidden = true;
-    githubSearchResults.innerHTML = "";
-    return;
-  }
-
-  githubSearchHandle = window.setTimeout(searchGithubReferences, 350);
-}
-
-async function searchGithubReferences() {
-  const requestId = ++githubSearchRequest;
-  const query = githubReference.value.trim();
-
-  githubSearchStatus.textContent = "Searching GitHub...";
-
-  try {
-    const results = await invoke("search_github_references", {
-      input: {
-        query,
-        githubKind: githubKind.value,
-      },
-    });
-
-    if (requestId !== githubSearchRequest) return;
-    renderGithubResults(results);
-  } catch (error) {
-    if (requestId !== githubSearchRequest) return;
-    githubSearchResults.hidden = true;
-    githubSearchResults.innerHTML = "";
-    githubSearchStatus.textContent = String(error);
-  }
-}
-
-function renderGithubResults(results) {
-  githubSearchResults.innerHTML = "";
-
-  if (!results.length) {
-    githubSearchResults.hidden = true;
-    githubSearchStatus.textContent = "No GitHub matches found.";
-    return;
-  }
-
-  githubSearchStatus.textContent = "";
-  githubSearchResults.hidden = false;
-
-  for (const result of results) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "search-result";
-    button.innerHTML = `
-      <strong>${escapeHtml(result.title)}</strong>
-      <span>${escapeHtml(result.reference)} / ${escapeHtml(result.state)}</span>
-    `;
-    button.addEventListener("click", () => {
-      githubReference.value = result.reference;
-      githubSearchResults.hidden = true;
-      githubSearchStatus.textContent = result.reference;
-    });
-    githubSearchResults.append(button);
-  }
-}
-
 async function loadGithubToken() {
   const savedToken = await invoke("get_github_token");
   const legacyToken = window.localStorage.getItem(LEGACY_GITHUB_TOKEN_STORAGE_KEY);
@@ -375,7 +275,6 @@ async function saveGithubToken() {
       : "GitHub token cleared.";
     hasGithubToken = Boolean(githubToken.value.trim());
     updateCreateModeAvailability();
-    scheduleGithubSearch();
   } catch (error) {
     githubTokenStatus.textContent = String(error);
   }
@@ -578,14 +477,13 @@ timerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const selected = selectedTaskItem();
   if (!selected) {
-    githubSearchStatus.textContent = "Select or create a task first.";
     return;
   }
 
   const task = {
     name: selected.task.name,
-    githubKind: githubKind.value || null,
-    githubReference: githubReference.value || null,
+    githubKind: selected.task.githubKind ?? null,
+    githubReference: selected.task.githubReference ?? null,
   };
 
   activeTimer = await invoke("start_timer", {
@@ -597,8 +495,6 @@ timerForm.addEventListener("submit", async (event) => {
   });
 
   note.value = "";
-  githubSearchResults.hidden = true;
-  githubSearchStatus.textContent = "";
   renderActiveTimer();
   await refresh();
 });
@@ -621,8 +517,6 @@ document.querySelectorAll(".tab").forEach((tab) => {
   });
 });
 
-githubKind.addEventListener("change", updateGithubControls);
-githubReference.addEventListener("input", scheduleGithubSearch);
 createFreeTextMode.addEventListener("click", () => setCreateTaskMode("free"));
 createIssueMode.addEventListener("click", () => setCreateTaskMode("issue"));
 createPullRequestMode.addEventListener("click", () => setCreateTaskMode("pull_request"));
@@ -653,5 +547,4 @@ document.addEventListener("keydown", (event) => {
 await listen("timer-updated", refresh);
 await listen("open-github-token-settings", openGithubTokenDialog);
 await loadGithubToken();
-updateGithubControls();
 await refresh();
