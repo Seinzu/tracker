@@ -1,4 +1,4 @@
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Days, Local, LocalResult, NaiveDate, SecondsFormat, TimeZone, Utc};
 use keyring::v1::{Entry, Error as KeyringError};
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
@@ -158,6 +158,11 @@ struct GithubTokenInput {
     token: Option<String>,
 }
 
+struct ReportRange {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GithubSearchResult {
@@ -248,15 +253,23 @@ fn update_time_entry_subtask(
 }
 
 #[tauri::command]
-fn summary_by_task(state: State<'_, AppState>) -> Result<Vec<SummaryRow>, String> {
+fn summary_by_task(
+    state: State<'_, AppState>,
+    period: Option<String>,
+) -> Result<Vec<SummaryRow>, String> {
     let conn = state.connect().map_err(String::from)?;
-    summary_by_task_inner(&conn).map_err(String::from)
+    let range = report_range_for_period(period).map_err(String::from)?;
+    summary_by_task_inner(&conn, range.as_ref()).map_err(String::from)
 }
 
 #[tauri::command]
-fn summary_by_subtask(state: State<'_, AppState>) -> Result<Vec<SummaryRow>, String> {
+fn summary_by_subtask(
+    state: State<'_, AppState>,
+    period: Option<String>,
+) -> Result<Vec<SummaryRow>, String> {
     let conn = state.connect().map_err(String::from)?;
-    summary_by_subtask_inner(&conn).map_err(String::from)
+    let range = report_range_for_period(period).map_err(String::from)?;
+    summary_by_subtask_inner(&conn, range.as_ref()).map_err(String::from)
 }
 
 #[tauri::command]
@@ -821,6 +834,44 @@ fn recent_entries_inner(conn: &Connection, limit: i64) -> Result<Vec<TimeEntryVi
     collect_rows(rows)
 }
 
+fn report_entries_inner(
+    conn: &Connection,
+    range: Option<&ReportRange>,
+) -> Result<Vec<TimeEntryView>, TrackerError> {
+    let mut entries = match range {
+        Some(range) => {
+            let start = format_utc(range.start);
+            let end = format_utc(range.end);
+            let now = now_string();
+            let mut stmt = conn.prepare(
+                "
+                SELECT e.id, e.task_id, t.name, e.subtask_id, s.name,
+                       t.github_kind, t.github_reference, e.started_at, e.ended_at, e.note
+                FROM time_entries e
+                JOIN tasks t ON t.id = e.task_id
+                LEFT JOIN subtasks s ON s.id = e.subtask_id
+                WHERE e.started_at < ?2
+                  AND COALESCE(e.ended_at, ?3) >= ?1
+                ORDER BY e.started_at DESC
+                ",
+            )?;
+            let rows = stmt.query_map(params![start, end, now], row_to_entry_view)?;
+            collect_rows(rows)?
+        }
+        None => recent_entries_inner(conn, 10_000)?,
+    };
+
+    if let Some(range) = range {
+        for entry in &mut entries {
+            entry.duration_seconds =
+                elapsed_seconds_in_range(&entry.started_at, entry.ended_at.as_deref(), range)?;
+        }
+        entries.retain(|entry| entry.duration_seconds > 0);
+    }
+
+    Ok(entries)
+}
+
 fn update_time_entry_subtask_inner(
     state: &State<'_, AppState>,
     input: UpdateEntrySubtaskInput,
@@ -851,8 +902,11 @@ fn update_time_entry_subtask_inner(
     entry_view_by_id(&conn, entry_id)
 }
 
-fn summary_by_task_inner(conn: &Connection) -> Result<Vec<SummaryRow>, TrackerError> {
-    let entries = recent_entries_inner(conn, 10_000)?;
+fn summary_by_task_inner(
+    conn: &Connection,
+    range: Option<&ReportRange>,
+) -> Result<Vec<SummaryRow>, TrackerError> {
+    let entries = report_entries_inner(conn, range)?;
     let mut rows: Vec<SummaryRow> = Vec::new();
 
     for entry in entries {
@@ -878,8 +932,11 @@ fn summary_by_task_inner(conn: &Connection) -> Result<Vec<SummaryRow>, TrackerEr
     Ok(rows)
 }
 
-fn summary_by_subtask_inner(conn: &Connection) -> Result<Vec<SummaryRow>, TrackerError> {
-    let entries = recent_entries_inner(conn, 10_000)?;
+fn summary_by_subtask_inner(
+    conn: &Connection,
+    range: Option<&ReportRange>,
+) -> Result<Vec<SummaryRow>, TrackerError> {
+    let entries = report_entries_inner(conn, range)?;
     let mut rows: Vec<SummaryRow> = Vec::new();
 
     for entry in entries {
@@ -1176,6 +1233,48 @@ fn elapsed_seconds(started_at: &str, ended_at: Option<&str>) -> Result<i64, Trac
     Ok((end - start).num_seconds().max(0))
 }
 
+fn elapsed_seconds_in_range(
+    started_at: &str,
+    ended_at: Option<&str>,
+    range: &ReportRange,
+) -> Result<i64, TrackerError> {
+    let start = DateTime::parse_from_rfc3339(started_at)?.with_timezone(&Utc);
+    let end = match ended_at {
+        Some(value) => DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc),
+        None => Utc::now(),
+    };
+    let clipped_start = start.max(range.start);
+    let clipped_end = end.min(range.end);
+
+    Ok((clipped_end - clipped_start).num_seconds().max(0))
+}
+
+fn report_range_for_period(period: Option<String>) -> Result<Option<ReportRange>, TrackerError> {
+    match period.as_deref() {
+        Some("today") => {
+            let today = Local::now().date_naive();
+            let tomorrow = today.checked_add_days(Days::new(1)).unwrap_or(today);
+
+            Ok(Some(ReportRange {
+                start: local_day_start(today),
+                end: local_day_start(tomorrow),
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn local_day_start(date: NaiveDate) -> DateTime<Utc> {
+    let midnight = date
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight should be a valid local time");
+
+    match Local.from_local_datetime(&midnight) {
+        LocalResult::Single(value) | LocalResult::Ambiguous(value, _) => value.with_timezone(&Utc),
+        LocalResult::None => Utc::now(),
+    }
+}
+
 fn normalize_required(value: &str) -> Result<String, TrackerError> {
     let value = value.trim();
     if value.is_empty() {
@@ -1192,5 +1291,9 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
 }
 
 fn now_string() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+    format_utc(Utc::now())
+}
+
+fn format_utc(value: DateTime<Utc>) -> String {
+    value.to_rfc3339_opts(SecondsFormat::Secs, true)
 }

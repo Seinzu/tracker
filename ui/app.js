@@ -19,6 +19,8 @@ const note = document.querySelector("#note");
 const recentRows = document.querySelector("#recentRows");
 const summaryRows = document.querySelector("#summaryRows");
 const summarySubtaskHeader = document.querySelector("#summarySubtaskHeader");
+const reportAllTimePeriod = document.querySelector("#reportAllTimePeriod");
+const reportTodayPeriod = document.querySelector("#reportTodayPeriod");
 const reportTaskMode = document.querySelector("#reportTaskMode");
 const reportSubtaskMode = document.querySelector("#reportSubtaskMode");
 const createTaskDialog = document.querySelector("#createTaskDialog");
@@ -45,6 +47,7 @@ let createTaskMode = "free";
 let createImportSearchHandle = null;
 let createImportSearchRequest = 0;
 let hasGithubToken = false;
+let reportPeriod = "all";
 let reportMode = "task";
 let taskSummaryRows = [];
 let subtaskSummaryRows = [];
@@ -210,6 +213,8 @@ function renderSummary() {
   const isDetailed = reportMode === "subtask";
   const rows = isDetailed ? subtaskSummaryRows : taskSummaryRows;
   summarySubtaskHeader.hidden = !isDetailed;
+  reportAllTimePeriod.classList.toggle("active", reportPeriod === "all");
+  reportTodayPeriod.classList.toggle("active", reportPeriod === "today");
   reportTaskMode.classList.toggle("active", !isDetailed);
   reportSubtaskMode.classList.toggle("active", isDetailed);
   summaryRows.innerHTML = "";
@@ -235,6 +240,13 @@ function renderSummary() {
 function setReportMode(mode) {
   reportMode = mode;
   renderSummary();
+}
+
+async function setReportPeriod(period) {
+  if (reportPeriod === period) return;
+  reportPeriod = period;
+  renderSummary();
+  await refresh();
 }
 
 function escapeHtml(value) {
@@ -460,8 +472,8 @@ async function refresh() {
     invoke("list_tasks"),
     invoke("get_active_timer"),
     invoke("recent_entries", { limit: 50 }),
-    invoke("summary_by_task"),
-    invoke("summary_by_subtask"),
+    invoke("summary_by_task", { period: reportPeriod }),
+    invoke("summary_by_subtask", { period: reportPeriod }),
   ]);
 
   activeTimer = active;
@@ -501,6 +513,8 @@ timerForm.addEventListener("submit", async (event) => {
 
 taskSelect.addEventListener("change", updateSelectedTaskDetails);
 createTaskButton.addEventListener("click", openCreateTaskDialog);
+reportAllTimePeriod.addEventListener("click", () => setReportPeriod("all"));
+reportTodayPeriod.addEventListener("click", () => setReportPeriod("today"));
 reportTaskMode.addEventListener("click", () => setReportMode("task"));
 reportSubtaskMode.addEventListener("click", () => setReportMode("subtask"));
 stopButton.addEventListener("click", async () => {

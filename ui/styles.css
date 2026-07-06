@@ -333,7 +333,8 @@ textarea {
   background: #fdfcf8;
   border-bottom: 1px solid #e4dfd5;
   display: flex;
-  justify-content: flex-end;
+  gap: 12px;
+  justify-content: space-between;
   min-height: 54px;
   padding: 10px 16px;
 }
@@ -429,6 +430,11 @@ td {
   .task-panel {
     border-bottom: 1px solid #dad7cf;
     border-right: 0;
+  }
+
+  .report-toolbar {
+    align-items: stretch;
+    flex-wrap: wrap;
   }
 }
 
