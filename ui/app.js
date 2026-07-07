@@ -8,6 +8,8 @@ const timerForm = document.querySelector("#timerForm");
 const startTimerButton = document.querySelector("#startTimerButton");
 const taskSelect = document.querySelector("#taskSelect");
 const createTaskButton = document.querySelector("#createTaskButton");
+const closeTaskButton = document.querySelector("#closeTaskButton");
+const taskSuggestions = document.querySelector("#taskSuggestions");
 const githubTokenDialog = document.querySelector("#githubTokenDialog");
 const githubToken = document.querySelector("#githubToken");
 const githubTokenClose = document.querySelector("#githubTokenClose");
@@ -121,6 +123,7 @@ function renderTaskOptions(tasks) {
 
   pendingSelectedTaskId = null;
   updateSelectedTaskDetails();
+  renderTaskSuggestions();
 }
 
 function selectedTaskItem() {
@@ -134,6 +137,36 @@ function subtasksForTask(taskId) {
 function updateSelectedTaskDetails() {
   const selected = selectedTaskItem();
   startTimerButton.disabled = !selected;
+  closeTaskButton.disabled = !selected;
+}
+
+function githubClosedTaskItems() {
+  return taskItems.filter((item) => {
+    const state = item.task.githubState?.toLowerCase();
+    return state === "closed" && item.task.githubReference;
+  });
+}
+
+function renderTaskSuggestions() {
+  const suggestions = githubClosedTaskItems();
+  taskSuggestions.innerHTML = "";
+  taskSuggestions.hidden = suggestions.length === 0;
+
+  for (const item of suggestions.slice(0, 3)) {
+    const row = document.createElement("div");
+    const text = document.createElement("span");
+    const button = document.createElement("button");
+
+    row.className = "task-suggestion";
+    text.textContent = `${item.task.name} is closed on GitHub.`;
+    button.type = "button";
+    button.className = "secondary compact";
+    button.textContent = "Close";
+    button.addEventListener("click", () => closeTask(item.task));
+
+    row.append(text, button);
+    taskSuggestions.append(row);
+  }
 }
 
 function renderRecent(entries) {
@@ -287,6 +320,7 @@ async function saveGithubToken() {
       : "GitHub token cleared.";
     hasGithubToken = Boolean(githubToken.value.trim());
     updateCreateModeAvailability();
+    await refreshGithubTaskStates();
   } catch (error) {
     githubTokenStatus.textContent = String(error);
   }
@@ -377,6 +411,26 @@ async function updateEntrySubtask(entryId, subtaskName) {
   await refresh();
 }
 
+async function closeTask(task = selectedTaskItem()?.task) {
+  if (!task) return;
+  if (!window.confirm(`Close "${task.name}"?`)) return;
+
+  await invoke("close_task", { taskId: task.id });
+  pendingSelectedTaskId = null;
+  await refresh();
+}
+
+async function refreshGithubTaskStates() {
+  if (!hasGithubToken) return;
+
+  try {
+    const tasks = await invoke("refresh_github_task_states");
+    renderTaskOptions(tasks);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
 async function createFreeTextTask() {
   const name = freeTaskName.value.trim();
   if (!name) {
@@ -389,6 +443,7 @@ async function createFreeTextTask() {
       name,
       githubKind: null,
       githubReference: null,
+      githubState: null,
     });
   } catch (error) {
     createTaskStatus.textContent = String(error);
@@ -458,6 +513,7 @@ function renderCreateImportResults(results) {
           name: result.title,
           githubKind: createTaskMode,
           githubReference: result.reference,
+          githubState: result.state,
         });
       } catch (error) {
         createTaskStatus.textContent = String(error);
@@ -496,6 +552,7 @@ timerForm.addEventListener("submit", async (event) => {
     name: selected.task.name,
     githubKind: selected.task.githubKind ?? null,
     githubReference: selected.task.githubReference ?? null,
+    githubState: selected.task.githubState ?? null,
   };
 
   activeTimer = await invoke("start_timer", {
@@ -513,6 +570,7 @@ timerForm.addEventListener("submit", async (event) => {
 
 taskSelect.addEventListener("change", updateSelectedTaskDetails);
 createTaskButton.addEventListener("click", openCreateTaskDialog);
+closeTaskButton.addEventListener("click", () => closeTask());
 reportAllTimePeriod.addEventListener("click", () => setReportPeriod("all"));
 reportTodayPeriod.addEventListener("click", () => setReportPeriod("today"));
 reportTaskMode.addEventListener("click", () => setReportMode("task"));
@@ -562,3 +620,4 @@ await listen("timer-updated", refresh);
 await listen("open-github-token-settings", openGithubTokenDialog);
 await loadGithubToken();
 await refresh();
+await refreshGithubTaskStates();

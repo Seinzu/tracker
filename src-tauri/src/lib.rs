@@ -1,4 +1,7 @@
-use chrono::{DateTime, Days, Local, LocalResult, NaiveDate, SecondsFormat, TimeZone, Utc};
+use chrono::{
+    DateTime, Days, Duration as ChronoDuration, Local, LocalResult, NaiveDate, SecondsFormat,
+    TimeZone, Utc,
+};
 use keyring::v1::{Entry, Error as KeyringError};
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
@@ -62,6 +65,9 @@ struct Task {
     name: String,
     github_kind: Option<String>,
     github_reference: Option<String>,
+    github_state: Option<String>,
+    github_checked_at: Option<String>,
+    closed_at: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -88,6 +94,7 @@ struct TaskInput {
     name: String,
     github_kind: Option<String>,
     github_reference: Option<String>,
+    github_state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -208,6 +215,14 @@ fn create_task(
 }
 
 #[tauri::command]
+fn close_task(state: State<'_, AppState>, task_id: i64, app: AppHandle) -> Result<(), String> {
+    close_task_inner(&state, task_id).map_err(String::from)?;
+    let _ = refresh_tray_menu(&app);
+    let _ = app.emit("timer-updated", ());
+    Ok(())
+}
+
+#[tauri::command]
 fn start_timer(
     state: State<'_, AppState>,
     input: StartTimerInput,
@@ -287,6 +302,11 @@ fn set_github_token(input: GithubTokenInput) -> Result<(), String> {
     set_github_token_inner(input).map_err(String::from)
 }
 
+#[tauri::command]
+fn refresh_github_task_states(state: State<'_, AppState>) -> Result<Vec<TaskWithSubtasks>, String> {
+    refresh_github_task_states_inner(&state).map_err(String::from)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -317,6 +337,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_tasks,
             create_task,
+            close_task,
             start_timer,
             stop_timer,
             get_active_timer,
@@ -326,7 +347,8 @@ pub fn run() {
             summary_by_subtask,
             search_github_references,
             get_github_token,
-            set_github_token
+            set_github_token,
+            refresh_github_task_states
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tracker");
@@ -615,6 +637,39 @@ fn issue_to_result(issue: GithubIssue) -> Option<GithubSearchResult> {
     })
 }
 
+fn github_issue_state_for_reference(
+    client: &Client,
+    token: Option<&str>,
+    reference: &str,
+) -> Result<Option<String>, TrackerError> {
+    let Some((owner, repo, number)) = parse_github_reference(reference) else {
+        return Ok(None);
+    };
+
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/issues/{number}");
+    let issue: GithubIssue = github_auth(client.get(url), token).send()?.json()?;
+    Ok(Some(issue.state))
+}
+
+fn should_refresh_github_task_state(task: &Task) -> bool {
+    if !matches!(
+        task.github_kind.as_deref(),
+        Some("issue") | Some("pull_request")
+    ) || task.github_reference.is_none()
+    {
+        return false;
+    }
+
+    let Some(checked_at) = task.github_checked_at.as_deref() else {
+        return true;
+    };
+    let Ok(checked_at) = DateTime::parse_from_rfc3339(checked_at) else {
+        return true;
+    };
+
+    checked_at.with_timezone(&Utc) < Utc::now() - ChronoDuration::minutes(30)
+}
+
 fn configure_database(conn: &Connection) -> Result<(), TrackerError> {
     conn.execute_batch(
         "
@@ -625,6 +680,9 @@ fn configure_database(conn: &Connection) -> Result<(), TrackerError> {
             name TEXT NOT NULL UNIQUE,
             github_kind TEXT,
             github_reference TEXT,
+            github_state TEXT,
+            github_checked_at TEXT,
+            closed_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -658,6 +716,32 @@ fn configure_database(conn: &Connection) -> Result<(), TrackerError> {
         ",
     )?;
 
+    ensure_column(conn, "tasks", "github_state", "TEXT")?;
+    ensure_column(conn, "tasks", "github_checked_at", "TEXT")?;
+    ensure_column(conn, "tasks", "closed_at", "TEXT")?;
+
+    Ok(())
+}
+
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_type: &str,
+) -> Result<(), TrackerError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}"),
+        [],
+    )?;
     Ok(())
 }
 
@@ -676,6 +760,76 @@ fn create_task_inner(
         subtasks: subtasks_for_task(&conn, task.id)?,
         task,
     })
+}
+
+fn close_task_inner(state: &State<'_, AppState>, task_id: i64) -> Result<(), TrackerError> {
+    let mut conn = state.connect()?;
+    let tx = conn.transaction()?;
+    let now = now_string();
+
+    tx.execute(
+        "
+        UPDATE tasks
+        SET closed_at = ?1, updated_at = ?1
+        WHERE id = ?2
+        ",
+        params![now, task_id],
+    )?;
+    tx.execute(
+        "
+        UPDATE time_entries
+        SET ended_at = ?1
+        WHERE task_id = ?2 AND ended_at IS NULL
+        ",
+        params![now, task_id],
+    )?;
+    tx.commit()?;
+
+    Ok(())
+}
+
+fn refresh_github_task_states_inner(
+    state: &State<'_, AppState>,
+) -> Result<Vec<TaskWithSubtasks>, TrackerError> {
+    let token = get_github_token_inner()?;
+    let Some(token) = token.filter(|token| !token.trim().is_empty()) else {
+        let conn = state.connect()?;
+        return list_tasks_inner(&conn);
+    };
+
+    let conn = state.connect()?;
+    let tasks = list_tasks_inner(&conn)?;
+    drop(conn);
+
+    let client = github_client()?;
+    for item in tasks {
+        let task = item.task;
+        if !should_refresh_github_task_state(&task) {
+            continue;
+        }
+
+        let Some(reference) = task.github_reference.as_deref() else {
+            continue;
+        };
+        let Some(github_state) =
+            github_issue_state_for_reference(&client, Some(token.as_str()), reference)?
+        else {
+            continue;
+        };
+
+        let conn = state.connect()?;
+        conn.execute(
+            "
+            UPDATE tasks
+            SET github_state = ?1, github_checked_at = ?2
+            WHERE id = ?3
+            ",
+            params![github_state, now_string(), task.id],
+        )?;
+    }
+
+    let conn = state.connect()?;
+    list_tasks_inner(&conn)
 }
 
 fn start_timer_inner(
@@ -760,6 +914,7 @@ fn start_existing_task_inner(
                 name: task.name,
                 github_kind: task.github_kind,
                 github_reference: task.github_reference,
+                github_state: task.github_state,
             },
             subtask_name,
             note: None,
@@ -772,7 +927,8 @@ fn active_timer_inner(conn: &Connection) -> Result<Option<ActiveTimer>, TrackerE
         .query_row(
             "
             SELECT e.id, e.started_at, e.note,
-                   t.id, t.name, t.github_kind, t.github_reference, t.created_at, t.updated_at,
+                   t.id, t.name, t.github_kind, t.github_reference,
+                   t.github_state, t.github_checked_at, t.closed_at, t.created_at, t.updated_at,
                    s.id, s.task_id, s.name, s.created_at
             FROM time_entries e
             JOIN tasks t ON t.id = e.task_id
@@ -784,13 +940,13 @@ fn active_timer_inner(conn: &Connection) -> Result<Option<ActiveTimer>, TrackerE
             [],
             |row| {
                 let started_at: String = row.get(1)?;
-                let subtask_id: Option<i64> = row.get(9)?;
+                let subtask_id: Option<i64> = row.get(12)?;
                 let subtask = match subtask_id {
                     Some(id) => Some(Subtask {
                         id,
-                        task_id: row.get(10)?,
-                        name: row.get(11)?,
-                        created_at: row.get(12)?,
+                        task_id: row.get(13)?,
+                        name: row.get(14)?,
+                        created_at: row.get(15)?,
                     }),
                     None => None,
                 };
@@ -802,8 +958,11 @@ fn active_timer_inner(conn: &Connection) -> Result<Option<ActiveTimer>, TrackerE
                         name: row.get(4)?,
                         github_kind: row.get(5)?,
                         github_reference: row.get(6)?,
-                        created_at: row.get(7)?,
-                        updated_at: row.get(8)?,
+                        github_state: row.get(7)?,
+                        github_checked_at: row.get(8)?,
+                        closed_at: row.get(9)?,
+                        created_at: row.get(10)?,
+                        updated_at: row.get(11)?,
                     },
                     subtask,
                     elapsed_seconds: elapsed_seconds(&started_at, None).unwrap_or_default(),
@@ -988,8 +1147,10 @@ fn entry_view_by_id(conn: &Connection, id: i64) -> Result<TimeEntryView, Tracker
 fn list_tasks_inner(conn: &Connection) -> Result<Vec<TaskWithSubtasks>, TrackerError> {
     let mut stmt = conn.prepare(
         "
-        SELECT id, name, github_kind, github_reference, created_at, updated_at
+        SELECT id, name, github_kind, github_reference, github_state,
+               github_checked_at, closed_at, created_at, updated_at
         FROM tasks
+        WHERE closed_at IS NULL
         ORDER BY updated_at DESC, name ASC
         ",
     )?;
@@ -999,8 +1160,11 @@ fn list_tasks_inner(conn: &Connection) -> Result<Vec<TaskWithSubtasks>, TrackerE
             name: row.get(1)?,
             github_kind: row.get(2)?,
             github_reference: row.get(3)?,
-            created_at: row.get(4)?,
-            updated_at: row.get(5)?,
+            github_state: row.get(4)?,
+            github_checked_at: row.get(5)?,
+            closed_at: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     })?;
 
@@ -1062,6 +1226,8 @@ fn upsert_task(tx: &Transaction<'_>, input: &TaskInput, now: &str) -> Result<Tas
     let name = normalize_required(&input.name)?;
     let github_kind = normalize_optional(input.github_kind.clone());
     let github_reference = normalize_optional(input.github_reference.clone());
+    let github_state = normalize_optional(input.github_state.clone());
+    let github_checked_at = github_state.as_ref().map(|_| now.to_owned());
 
     let existing_id: Option<i64> = tx
         .query_row(
@@ -1076,20 +1242,42 @@ fn upsert_task(tx: &Transaction<'_>, input: &TaskInput, now: &str) -> Result<Tas
             tx.execute(
                 "
                 UPDATE tasks
-                SET github_kind = ?1, github_reference = ?2, updated_at = ?3
-                WHERE id = ?4
+                SET github_kind = ?1,
+                    github_reference = ?2,
+                    github_state = ?3,
+                    github_checked_at = ?4,
+                    closed_at = NULL,
+                    updated_at = ?5
+                WHERE id = ?6
                 ",
-                params![github_kind, github_reference, now, id],
+                params![
+                    github_kind,
+                    github_reference,
+                    github_state,
+                    github_checked_at,
+                    now,
+                    id
+                ],
             )?;
             id
         }
         None => {
             tx.execute(
                 "
-                INSERT INTO tasks (name, github_kind, github_reference, created_at, updated_at)
-                VALUES (?1, ?2, ?3, ?4, ?4)
+                INSERT INTO tasks (
+                    name, github_kind, github_reference, github_state,
+                    github_checked_at, created_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
                 ",
-                params![name, github_kind, github_reference, now],
+                params![
+                    name,
+                    github_kind,
+                    github_reference,
+                    github_state,
+                    github_checked_at,
+                    now
+                ],
             )?;
             tx.last_insert_rowid()
         }
@@ -1137,7 +1325,8 @@ fn stop_active_entries(tx: &Transaction<'_>, ended_at: &str) -> Result<(), Track
 fn task_by_id(tx: &Transaction<'_>, id: i64) -> Result<Task, TrackerError> {
     tx.query_row(
         "
-        SELECT id, name, github_kind, github_reference, created_at, updated_at
+        SELECT id, name, github_kind, github_reference, github_state,
+               github_checked_at, closed_at, created_at, updated_at
         FROM tasks
         WHERE id = ?1
         ",
@@ -1148,8 +1337,11 @@ fn task_by_id(tx: &Transaction<'_>, id: i64) -> Result<Task, TrackerError> {
                 name: row.get(1)?,
                 github_kind: row.get(2)?,
                 github_reference: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+                github_state: row.get(4)?,
+                github_checked_at: row.get(5)?,
+                closed_at: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         },
     )
@@ -1159,7 +1351,8 @@ fn task_by_id(tx: &Transaction<'_>, id: i64) -> Result<Task, TrackerError> {
 fn task_by_id_conn(conn: &Connection, id: i64) -> Result<Task, TrackerError> {
     conn.query_row(
         "
-        SELECT id, name, github_kind, github_reference, created_at, updated_at
+        SELECT id, name, github_kind, github_reference, github_state,
+               github_checked_at, closed_at, created_at, updated_at
         FROM tasks
         WHERE id = ?1
         ",
@@ -1170,8 +1363,11 @@ fn task_by_id_conn(conn: &Connection, id: i64) -> Result<Task, TrackerError> {
                 name: row.get(1)?,
                 github_kind: row.get(2)?,
                 github_reference: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+                github_state: row.get(4)?,
+                github_checked_at: row.get(5)?,
+                closed_at: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         },
     )

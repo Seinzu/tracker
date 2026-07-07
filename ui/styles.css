@@ -130,7 +130,28 @@ textarea {
 .task-picker {
   display: grid;
   gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.task-suggestions {
+  display: grid;
+  gap: 8px;
+}
+
+.task-suggestion {
+  align-items: center;
+  background: #fffefa;
+  border: 1px solid #d4cec2;
+  border-radius: 6px;
+  color: #5c6468;
+  display: grid;
+  gap: 10px;
   grid-template-columns: minmax(0, 1fr) auto;
+  padding: 10px;
+}
+
+.task-suggestion span {
+  min-width: 0;
 }
 
 .search-status {
@@ -528,6 +549,12 @@ td {
 
   .search-results {
     border-color: #46565b;
+  }
+
+  .task-suggestion {
+    background: #1c2528;
+    border-color: #46565b;
+    color: #d4dfdc;
   }
 
   .search-result {
