@@ -81,6 +81,24 @@ jobs:
             exit 1
           fi
 
+      - name: Set app version from release tag
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag_name || github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error title=Invalid release tag::Release tag '$RELEASE_TAG' must look like v1.2.3."
+            exit 1
+          fi
+
+          APP_VERSION="$version" perl -0pi -e 's/^version = "[^"]+"/version = "$ENV{APP_VERSION}"/m' src-tauri/Cargo.toml
+          APP_VERSION="$version" perl -0pi -e 's/"version":\s*"[^"]+"/"version": "$ENV{APP_VERSION}"/' src-tauri/tauri.conf.json
+
+          echo "Building Tracker $version from tag $RELEASE_TAG"
+          grep -n '^version = ' src-tauri/Cargo.toml
+          grep -n '"version"' src-tauri/tauri.conf.json
+
       - name: Import Apple Developer ID certificate
         if: steps.signing-mode.outputs.notarize == 'true'
         env:
