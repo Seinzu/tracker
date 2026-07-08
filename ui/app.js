@@ -53,6 +53,8 @@ let reportPeriod = "all";
 let reportMode = "task";
 let taskSummaryRows = [];
 let subtaskSummaryRows = [];
+let pendingCloseTaskId = null;
+let pendingCloseResetHandle = null;
 
 function formatDuration(seconds) {
   const value = Math.max(0, Math.floor(seconds));
@@ -138,6 +140,10 @@ function updateSelectedTaskDetails() {
   const selected = selectedTaskItem();
   startTimerButton.disabled = !selected;
   closeTaskButton.disabled = !selected;
+
+  if (!selected || pendingCloseTaskId !== selected.task.id) {
+    resetCloseConfirmation();
+  }
 }
 
 function githubClosedTaskItems() {
@@ -411,13 +417,42 @@ async function updateEntrySubtask(entryId, subtaskName) {
   await refresh();
 }
 
+function resetCloseConfirmation() {
+  window.clearTimeout(pendingCloseResetHandle);
+  pendingCloseResetHandle = null;
+  pendingCloseTaskId = null;
+  closeTaskButton.textContent = "Close";
+}
+
+function requestCloseSelectedTask() {
+  const task = selectedTaskItem()?.task;
+  if (!task) return;
+
+  if (pendingCloseTaskId === task.id) {
+    closeTask(task);
+    return;
+  }
+
+  pendingCloseTaskId = task.id;
+  closeTaskButton.textContent = "Confirm";
+  window.clearTimeout(pendingCloseResetHandle);
+  pendingCloseResetHandle = window.setTimeout(resetCloseConfirmation, 4000);
+}
+
 async function closeTask(task = selectedTaskItem()?.task) {
   if (!task) return;
-  if (!window.confirm(`Close "${task.name}"?`)) return;
 
-  await invoke("close_task", { taskId: task.id });
-  pendingSelectedTaskId = null;
-  await refresh();
+  closeTaskButton.disabled = true;
+  try {
+    await invoke("close_task", { input: { taskId: task.id } });
+    resetCloseConfirmation();
+    pendingSelectedTaskId = null;
+    await refresh();
+  } catch (error) {
+    closeTaskButton.disabled = false;
+    taskSuggestions.hidden = false;
+    taskSuggestions.innerHTML = `<div class="task-suggestion"><span>${escapeHtml(String(error))}</span></div>`;
+  }
 }
 
 async function refreshGithubTaskStates() {
@@ -570,7 +605,7 @@ timerForm.addEventListener("submit", async (event) => {
 
 taskSelect.addEventListener("change", updateSelectedTaskDetails);
 createTaskButton.addEventListener("click", openCreateTaskDialog);
-closeTaskButton.addEventListener("click", () => closeTask());
+closeTaskButton.addEventListener("click", requestCloseSelectedTask);
 reportAllTimePeriod.addEventListener("click", () => setReportPeriod("all"));
 reportTodayPeriod.addEventListener("click", () => setReportPeriod("today"));
 reportTaskMode.addEventListener("click", () => setReportMode("task"));

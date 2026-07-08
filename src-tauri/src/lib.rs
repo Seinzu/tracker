@@ -112,6 +112,12 @@ struct UpdateEntrySubtaskInput {
     subtask_name: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloseTaskInput {
+    task_id: i64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ActiveTimer {
@@ -215,8 +221,12 @@ fn create_task(
 }
 
 #[tauri::command]
-fn close_task(state: State<'_, AppState>, task_id: i64, app: AppHandle) -> Result<(), String> {
-    close_task_inner(&state, task_id).map_err(String::from)?;
+fn close_task(
+    state: State<'_, AppState>,
+    input: CloseTaskInput,
+    app: AppHandle,
+) -> Result<(), String> {
+    close_task_inner(&state, input.task_id).map_err(String::from)?;
     let _ = refresh_tray_menu(&app);
     let _ = app.emit("timer-updated", ());
     Ok(())
@@ -764,6 +774,10 @@ fn create_task_inner(
 
 fn close_task_inner(state: &State<'_, AppState>, task_id: i64) -> Result<(), TrackerError> {
     let mut conn = state.connect()?;
+    close_task_conn(&mut conn, task_id)
+}
+
+fn close_task_conn(conn: &mut Connection, task_id: i64) -> Result<(), TrackerError> {
     let tx = conn.transaction()?;
     let now = now_string();
 
@@ -1492,4 +1506,83 @@ fn now_string() -> String {
 
 fn format_utc(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn memory_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        configure_database(&conn).expect("configure database");
+        conn
+    }
+
+    fn create_test_task(conn: &mut Connection, name: &str) -> Task {
+        let tx = conn.transaction().expect("begin transaction");
+        let task = upsert_task(
+            &tx,
+            &TaskInput {
+                name: name.to_owned(),
+                github_kind: None,
+                github_reference: None,
+                github_state: None,
+            },
+            &now_string(),
+        )
+        .expect("upsert task");
+        tx.commit().expect("commit transaction");
+        task
+    }
+
+    #[test]
+    fn close_task_input_accepts_frontend_camel_case() {
+        let input: CloseTaskInput =
+            serde_json::from_value(json!({ "taskId": 42 })).expect("deserialize close task input");
+
+        assert_eq!(input.task_id, 42);
+    }
+
+    #[test]
+    fn closing_task_removes_it_from_open_task_list() {
+        let mut conn = memory_conn();
+        let task = create_test_task(&mut conn, "Old task");
+
+        assert_eq!(list_tasks_inner(&conn).expect("list tasks").len(), 1);
+
+        close_task_conn(&mut conn, task.id).expect("close task");
+
+        assert!(list_tasks_inner(&conn).expect("list tasks").is_empty());
+        let closed_at: Option<String> = conn
+            .query_row(
+                "SELECT closed_at FROM tasks WHERE id = ?1",
+                params![task.id],
+                |row| row.get(0),
+            )
+            .expect("read closed_at");
+        assert!(closed_at.is_some());
+    }
+
+    #[test]
+    fn closing_task_stops_active_timer_for_that_task() {
+        let mut conn = memory_conn();
+        let task = create_test_task(&mut conn, "Running task");
+        conn.execute(
+            "INSERT INTO time_entries (task_id, started_at) VALUES (?1, ?2)",
+            params![task.id, now_string()],
+        )
+        .expect("insert active timer");
+
+        close_task_conn(&mut conn, task.id).expect("close task");
+
+        let ended_at: Option<String> = conn
+            .query_row(
+                "SELECT ended_at FROM time_entries WHERE task_id = ?1",
+                params![task.id],
+                |row| row.get(0),
+            )
+            .expect("read ended_at");
+        assert!(ended_at.is_some());
+    }
 }
