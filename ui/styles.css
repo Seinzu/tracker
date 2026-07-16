@@ -360,6 +360,19 @@ textarea {
   padding: 10px 16px;
 }
 
+.report-total {
+  align-items: baseline;
+  color: #5c6468;
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.report-total strong {
+  color: #202426;
+  font-size: 16px;
+}
+
 .segmented-control {
   background: #ece7de;
   border: 1px solid #d4cec2;
@@ -457,6 +470,10 @@ td {
     align-items: stretch;
     flex-wrap: wrap;
   }
+
+  .report-total {
+    margin-left: 0;
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -509,6 +526,14 @@ td {
 
   .report-toolbar {
     border-color: #3f4d51;
+  }
+
+  .report-total {
+    color: #aebbb8;
+  }
+
+  .report-total strong {
+    color: #f4f1e8;
   }
 
   .segmented-control {

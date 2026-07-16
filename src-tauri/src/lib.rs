@@ -8,6 +8,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT}
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::thread;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuBuilder, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
@@ -228,6 +229,7 @@ fn close_task(
 ) -> Result<(), String> {
     close_task_inner(&state, input.task_id).map_err(String::from)?;
     let _ = refresh_tray_menu(&app);
+    let _ = refresh_tray_status(&app);
     let _ = app.emit("timer-updated", ());
     Ok(())
 }
@@ -240,6 +242,7 @@ fn start_timer(
 ) -> Result<ActiveTimer, String> {
     let timer = start_timer_inner(&state, input).map_err(String::from)?;
     let _ = refresh_tray_menu(&app);
+    let _ = refresh_tray_status(&app);
     let _ = app.emit("timer-updated", ());
     Ok(timer)
 }
@@ -247,6 +250,7 @@ fn start_timer(
 #[tauri::command]
 fn stop_timer(state: State<'_, AppState>, app: AppHandle) -> Result<Option<TimeEntryView>, String> {
     let stopped = stop_timer_inner(&state).map_err(String::from)?;
+    let _ = refresh_tray_status(&app);
     let _ = app.emit("timer-updated", ());
     Ok(stopped)
 }
@@ -334,6 +338,7 @@ pub fn run() {
             app.manage(state);
             build_app_menu(app.handle())?;
             build_tray(app.handle())?;
+            start_tray_status_updater(app.handle());
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -401,7 +406,11 @@ fn build_app_menu(app: &AppHandle) -> Result<(), TrackerError> {
 
 fn build_tray(app: &AppHandle) -> Result<(), TrackerError> {
     let menu = build_tray_menu(app)?;
-    let mut builder = TrayIconBuilder::with_id(TRAY_ID).menu(&menu);
+    let status = tray_status_label(app)?;
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .title(&status)
+        .tooltip(&status);
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
@@ -413,6 +422,7 @@ fn build_tray(app: &AppHandle) -> Result<(), TrackerError> {
             "stop" => {
                 let state = app.state::<AppState>();
                 let _ = stop_timer_inner(&state);
+                let _ = refresh_tray_status(app);
                 let _ = app.emit("timer-updated", ());
             }
             "quit" => app.exit(0),
@@ -424,6 +434,7 @@ fn build_tray(app: &AppHandle) -> Result<(), TrackerError> {
                     let state = app.state::<AppState>();
                     let _ = start_existing_task_inner(&state, task_id);
                     let _ = refresh_tray_menu(app);
+                    let _ = refresh_tray_status(app);
                     let _ = app.emit("timer-updated", ());
                 }
             }
@@ -467,13 +478,63 @@ fn refresh_tray_menu(app: &AppHandle) -> Result<(), TrackerError> {
     Ok(())
 }
 
+fn refresh_tray_status(app: &AppHandle) -> Result<(), TrackerError> {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let status = tray_status_label(app)?;
+        tray.set_title(Some(status.as_str()))?;
+        tray.set_tooltip(Some(status.as_str()))?;
+    }
+    Ok(())
+}
+
+fn start_tray_status_updater(app: &AppHandle) {
+    let app = app.clone();
+    thread::spawn(move || {
+        loop {
+            let _ = refresh_tray_status(&app);
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
+fn tray_status_label(app: &AppHandle) -> Result<String, TrackerError> {
+    let state = app.state::<AppState>();
+    let conn = state.connect()?;
+    let Some(active) = active_timer_inner(&conn)? else {
+        return Ok("stopped".to_owned());
+    };
+
+    Ok(active_timer_tray_label(&active))
+}
+
+fn active_timer_tray_label(active: &ActiveTimer) -> String {
+    let task_label = match active.subtask.as_ref() {
+        Some(subtask) => format!("{} / {}", active.task.name, subtask.name),
+        None => active.task.name.clone(),
+    };
+    let elapsed = format_duration_hms(active.elapsed_seconds);
+    format!("{} {}", truncate_chars(&task_label, 34), elapsed)
+}
+
+fn format_duration_hms(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
 fn tray_label(value: &str) -> String {
     const MAX_CHARS: usize = 42;
-    if value.chars().count() <= MAX_CHARS {
+    truncate_chars(value, MAX_CHARS)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
         return value.to_owned();
     }
 
-    let mut label = value.chars().take(MAX_CHARS - 1).collect::<String>();
+    let mut label = value.chars().take(max_chars - 1).collect::<String>();
     label.push_str("...");
     label
 }

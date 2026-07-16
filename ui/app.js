@@ -23,6 +23,7 @@ const summaryRows = document.querySelector("#summaryRows");
 const summarySubtaskHeader = document.querySelector("#summarySubtaskHeader");
 const reportAllTimePeriod = document.querySelector("#reportAllTimePeriod");
 const reportTodayPeriod = document.querySelector("#reportTodayPeriod");
+const reportTotalDuration = document.querySelector("#reportTotalDuration");
 const reportTaskMode = document.querySelector("#reportTaskMode");
 const reportSubtaskMode = document.querySelector("#reportSubtaskMode");
 const createTaskDialog = document.querySelector("#createTaskDialog");
@@ -256,6 +257,9 @@ function renderSummary() {
   reportTodayPeriod.classList.toggle("active", reportPeriod === "today");
   reportTaskMode.classList.toggle("active", !isDetailed);
   reportSubtaskMode.classList.toggle("active", isDetailed);
+  reportTotalDuration.textContent = formatDuration(
+    rows.reduce((total, item) => total + item.totalSeconds, 0),
+  );
   summaryRows.innerHTML = "";
 
   if (!rows.length) {
