@@ -23,6 +23,9 @@ const summaryRows = document.querySelector("#summaryRows");
 const summarySubtaskHeader = document.querySelector("#summarySubtaskHeader");
 const reportAllTimePeriod = document.querySelector("#reportAllTimePeriod");
 const reportTodayPeriod = document.querySelector("#reportTodayPeriod");
+const reportThisWeekPeriod = document.querySelector("#reportThisWeekPeriod");
+const reportLastWeekPeriod = document.querySelector("#reportLastWeekPeriod");
+const reportThisMonthPeriod = document.querySelector("#reportThisMonthPeriod");
 const reportTotalDuration = document.querySelector("#reportTotalDuration");
 const reportTaskMode = document.querySelector("#reportTaskMode");
 const reportSubtaskMode = document.querySelector("#reportSubtaskMode");
@@ -255,6 +258,9 @@ function renderSummary() {
   summarySubtaskHeader.hidden = !isDetailed;
   reportAllTimePeriod.classList.toggle("active", reportPeriod === "all");
   reportTodayPeriod.classList.toggle("active", reportPeriod === "today");
+  reportThisWeekPeriod.classList.toggle("active", reportPeriod === "this_week");
+  reportLastWeekPeriod.classList.toggle("active", reportPeriod === "last_week");
+  reportThisMonthPeriod.classList.toggle("active", reportPeriod === "this_month");
   reportTaskMode.classList.toggle("active", !isDetailed);
   reportSubtaskMode.classList.toggle("active", isDetailed);
   reportTotalDuration.textContent = formatDuration(
@@ -612,6 +618,9 @@ createTaskButton.addEventListener("click", openCreateTaskDialog);
 closeTaskButton.addEventListener("click", requestCloseSelectedTask);
 reportAllTimePeriod.addEventListener("click", () => setReportPeriod("all"));
 reportTodayPeriod.addEventListener("click", () => setReportPeriod("today"));
+reportThisWeekPeriod.addEventListener("click", () => setReportPeriod("this_week"));
+reportLastWeekPeriod.addEventListener("click", () => setReportPeriod("last_week"));
+reportThisMonthPeriod.addEventListener("click", () => setReportPeriod("this_month"));
 reportTaskMode.addEventListener("click", () => setReportMode("task"));
 reportSubtaskMode.addEventListener("click", () => setReportMode("subtask"));
 stopButton.addEventListener("click", async () => {

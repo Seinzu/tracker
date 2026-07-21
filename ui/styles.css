@@ -383,6 +383,10 @@ textarea {
   padding: 3px;
 }
 
+.report-period-control {
+  grid-template-columns: repeat(5, minmax(86px, 1fr));
+}
+
 .segment {
   background: transparent;
   color: #495156;
@@ -469,6 +473,10 @@ td {
   .report-toolbar {
     align-items: stretch;
     flex-wrap: wrap;
+  }
+
+  .report-period-control {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
   }
 
   .report-total {

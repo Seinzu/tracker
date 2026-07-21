@@ -1,6 +1,6 @@
 use chrono::{
-    DateTime, Days, Duration as ChronoDuration, Local, LocalResult, NaiveDate, SecondsFormat,
-    TimeZone, Utc,
+    DateTime, Datelike, Days, Duration as ChronoDuration, Local, LocalResult, NaiveDate,
+    SecondsFormat, TimeZone, Utc,
 };
 use keyring::v1::{Entry, Error as KeyringError};
 use reqwest::blocking::{Client, RequestBuilder};
@@ -1521,18 +1521,48 @@ fn elapsed_seconds_in_range(
 }
 
 fn report_range_for_period(period: Option<String>) -> Result<Option<ReportRange>, TrackerError> {
-    match period.as_deref() {
-        Some("today") => {
-            let today = Local::now().date_naive();
-            let tomorrow = today.checked_add_days(Days::new(1)).unwrap_or(today);
-
-            Ok(Some(ReportRange {
-                start: local_day_start(today),
-                end: local_day_start(tomorrow),
-            }))
-        }
-        _ => Ok(None),
+    let today = Local::now().date_naive();
+    match report_dates_for_period(period.as_deref(), today) {
+        Some((start, end)) => Ok(Some(ReportRange {
+            start: local_day_start(start),
+            end: local_day_start(end),
+        })),
+        None => Ok(None),
     }
+}
+
+fn report_dates_for_period(
+    period: Option<&str>,
+    today: NaiveDate,
+) -> Option<(NaiveDate, NaiveDate)> {
+    match period {
+        Some("today") => Some((today, today.checked_add_days(Days::new(1)).unwrap_or(today))),
+        Some("this_week") => {
+            let start = iso_week_start(today);
+            Some((start, start.checked_add_days(Days::new(7)).unwrap_or(start)))
+        }
+        Some("last_week") => {
+            let end = iso_week_start(today);
+            let start = end.checked_sub_days(Days::new(7)).unwrap_or(end);
+            Some((start, end))
+        }
+        Some("this_month") => {
+            let start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)?;
+            let (next_year, next_month) = if today.month() == 12 {
+                (today.year() + 1, 1)
+            } else {
+                (today.year(), today.month() + 1)
+            };
+            let end = NaiveDate::from_ymd_opt(next_year, next_month, 1)?;
+            Some((start, end))
+        }
+        _ => None,
+    }
+}
+
+fn iso_week_start(date: NaiveDate) -> NaiveDate {
+    date.checked_sub_days(Days::new(date.weekday().num_days_from_monday().into()))
+        .unwrap_or(date)
 }
 
 fn local_day_start(date: NaiveDate) -> DateTime<Utc> {
@@ -1645,5 +1675,38 @@ mod tests {
             )
             .expect("read ended_at");
         assert!(ended_at.is_some());
+    }
+
+    #[test]
+    fn report_dates_use_iso_week_boundaries() {
+        let today = NaiveDate::from_ymd_opt(2026, 1, 1).expect("test date");
+
+        assert_eq!(
+            report_dates_for_period(Some("this_week"), today),
+            Some((
+                NaiveDate::from_ymd_opt(2025, 12, 29).expect("week start"),
+                NaiveDate::from_ymd_opt(2026, 1, 5).expect("week end")
+            ))
+        );
+        assert_eq!(
+            report_dates_for_period(Some("last_week"), today),
+            Some((
+                NaiveDate::from_ymd_opt(2025, 12, 22).expect("last week start"),
+                NaiveDate::from_ymd_opt(2025, 12, 29).expect("last week end")
+            ))
+        );
+    }
+
+    #[test]
+    fn report_dates_use_calendar_month_boundaries() {
+        let today = NaiveDate::from_ymd_opt(2026, 12, 15).expect("test date");
+
+        assert_eq!(
+            report_dates_for_period(Some("this_month"), today),
+            Some((
+                NaiveDate::from_ymd_opt(2026, 12, 1).expect("month start"),
+                NaiveDate::from_ymd_opt(2027, 1, 1).expect("month end")
+            ))
+        );
     }
 }
