@@ -37,7 +37,14 @@
 
             <label>
               Subtask
-              <input id="subtaskName" name="subtaskName" autocomplete="off" placeholder="Design, review, implementation" />
+              <input
+                id="subtaskName"
+                name="subtaskName"
+                autocomplete="off"
+                list="subtaskSuggestions"
+                placeholder="Design, review, implementation"
+              />
+              <datalist id="subtaskSuggestions"></datalist>
             </label>
 
             <label>

@@ -17,6 +17,7 @@ const githubTokenClear = document.querySelector("#githubTokenClear");
 const githubTokenSave = document.querySelector("#githubTokenSave");
 const githubTokenStatus = document.querySelector("#githubTokenStatus");
 const subtaskName = document.querySelector("#subtaskName");
+const subtaskSuggestions = document.querySelector("#subtaskSuggestions");
 const note = document.querySelector("#note");
 const recentRows = document.querySelector("#recentRows");
 const summaryRows = document.querySelector("#summaryRows");
@@ -140,10 +141,39 @@ function subtasksForTask(taskId) {
   return taskItems.find((item) => item.task.id === taskId)?.subtasks ?? [];
 }
 
+function orderedSubtaskSuggestions() {
+  const selectedTask = selectedTaskItem();
+  const selectedTaskNames = selectedTask?.subtasks.map((subtask) => subtask.name) ?? [];
+  const otherNames = taskItems.flatMap((item) =>
+    item.task.id === selectedTask?.task.id ? [] : item.subtasks.map((subtask) => subtask.name),
+  );
+  const seen = new Set();
+
+  return [...selectedTaskNames, ...otherNames]
+    .map((name) => name.trim())
+    .filter((name) => {
+      const key = name.toLowerCase();
+      if (!name || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function renderSubtaskSuggestions() {
+  subtaskSuggestions.innerHTML = "";
+
+  for (const name of orderedSubtaskSuggestions()) {
+    const option = document.createElement("option");
+    option.value = name;
+    subtaskSuggestions.append(option);
+  }
+}
+
 function updateSelectedTaskDetails() {
   const selected = selectedTaskItem();
   startTimerButton.disabled = !selected;
   closeTaskButton.disabled = !selected;
+  renderSubtaskSuggestions();
 
   if (!selected || pendingCloseTaskId !== selected.task.id) {
     resetCloseConfirmation();
