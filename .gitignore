@@ -2,3 +2,8 @@
 /src-tauri/target/
 /.DS_Store
 
+# Tauri writes a capability schema per host platform it is built on. This app
+# targets macOS, so only those schemas are kept; building on another platform
+# should not add one to the repository.
+/src-tauri/gen/schemas/linux-schema.json
+/src-tauri/gen/schemas/windows-schema.json
