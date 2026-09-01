@@ -60,6 +60,7 @@
           <nav class="tabs" aria-label="Views">
             <button class="tab active" data-tab="recent" type="button">Recent</button>
             <button class="tab" data-tab="reports" type="button">Reports</button>
+            <button class="tab" data-tab="subtasks" type="button">Subtasks</button>
           </nav>
 
           <section id="recentView" class="view active" aria-label="Recent time entries">
@@ -90,27 +91,57 @@
                 <span>Total</span>
                 <strong id="reportTotalDuration" class="mono">00:00:00</strong>
               </div>
-              <div class="segmented-control" aria-label="Report detail">
+              <div class="segmented-control report-mode-control" aria-label="Report grouping">
                 <button id="reportTaskMode" class="segment active" type="button">Task</button>
                 <button id="reportSubtaskMode" class="segment" type="button">Subtask</button>
+                <button id="reportTaskSubtaskMode" class="segment" type="button">Task + Subtask</button>
               </div>
+            </header>
+            <table>
+              <thead id="summaryHeader"></thead>
+              <tbody id="summaryRows"></tbody>
+            </table>
+          </section>
+
+          <section id="subtasksView" class="view" aria-label="Subtasks">
+            <header class="subtask-toolbar">
+              <label class="subtask-add">
+                <span>Add a subtask</span>
+                <div class="inline-edit">
+                  <input id="newSubtaskName" autocomplete="off" placeholder="Code review, deploy, testing" />
+                  <button id="addSubtaskButton" class="primary compact" type="button">Add</button>
+                </div>
+              </label>
+              <p id="subtaskStatus" class="dialog-status" aria-live="polite"></p>
             </header>
             <table>
               <thead>
                 <tr>
-                  <th>Task</th>
-                  <th id="summarySubtaskHeader" hidden>Subtask</th>
-                  <th>Reference</th>
+                  <th>Subtask</th>
                   <th>Entries</th>
                   <th>Total</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
-              <tbody id="summaryRows"></tbody>
+              <tbody id="subtaskRows"></tbody>
             </table>
           </section>
         </section>
       </section>
     </main>
+
+    <div id="databaseErrorDialog" class="dialog-backdrop" hidden>
+      <section class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="databaseErrorTitle">
+        <header class="dialog-header">
+          <h2 id="databaseErrorTitle">Database Not Updated</h2>
+        </header>
+        <p id="databaseErrorMessage"></p>
+        <p id="databaseErrorBackup" class="dialog-status"></p>
+        <footer class="dialog-actions">
+          <button id="databaseErrorClose" class="secondary" type="button">Dismiss</button>
+        </footer>
+      </section>
+    </div>
 
     <div id="githubTokenDialog" class="dialog-backdrop" hidden>
       <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="githubTokenTitle">

@@ -15,6 +15,8 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State};
 use thiserror::Error;
 
+mod db;
+
 const TRAY_ID: &str = "tracker-tray";
 const TRAY_TASK_PREFIX: &str = "start-task:";
 const MENU_GITHUB_TOKEN_ID: &str = "github-token-settings";
@@ -25,13 +27,20 @@ const GITHUB_KEYCHAIN_USER: &str = "github-token";
 #[derive(Clone)]
 struct AppState {
     db_path: PathBuf,
+    backup_path: Option<PathBuf>,
+    /// Set when the schema could not be brought up to date at startup. Every
+    /// database access fails with this message rather than reading a schema the
+    /// queries below do not match.
+    migration_error: Option<String>,
 }
 
 impl AppState {
     fn connect(&self) -> Result<Connection, TrackerError> {
-        let conn = Connection::open(&self.db_path)?;
-        configure_database(&conn)?;
-        Ok(conn)
+        if let Some(message) = self.migration_error.as_deref() {
+            return Err(TrackerError::DatabaseUnavailable(message.to_owned()));
+        }
+
+        db::open(&self.db_path)
     }
 }
 
@@ -43,6 +52,8 @@ enum TrackerError {
     Time(#[from] chrono::ParseError),
     #[error("task name is required")]
     MissingTaskName,
+    #[error("subtask name is required")]
+    MissingSubtaskName,
     #[error("application data directory is not available")]
     MissingDataDir,
     #[error("tauri error: {0}")]
@@ -51,6 +62,18 @@ enum TrackerError {
     Http(#[from] reqwest::Error),
     #[error("keychain error: {0}")]
     Keychain(#[from] KeyringError),
+    #[error("file error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error(
+        "this database uses schema version {found}, but this version of Tracker only supports version {supported}. Update Tracker to open it."
+    )]
+    SchemaTooNew { found: i64, supported: i64 },
+    #[error("no migration is defined for schema version {0}")]
+    MissingMigration(i64),
+    #[error("the migration would have left {0} time entries pointing at missing rows")]
+    MigrationIntegrity(i64),
+    #[error("the database could not be opened: {0}")]
+    DatabaseUnavailable(String),
 }
 
 impl From<TrackerError> for String {
@@ -73,15 +96,31 @@ struct Task {
     updated_at: String,
 }
 
+/// A subtask, shared across every task.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Subtask {
     id: i64,
-    task_id: i64,
     name: String,
+    archived_at: Option<String>,
     created_at: String,
 }
 
+/// A subtask together with how much it has been used, for the management view.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubtaskView {
+    id: i64,
+    name: String,
+    archived_at: Option<String>,
+    created_at: String,
+    entry_count: i64,
+    total_seconds: i64,
+}
+
+/// A task alongside the subtasks already recorded against it, most recently
+/// used first. Subtasks are shared, so this is a usage history rather than a
+/// set of subtasks the task owns.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TaskWithSubtasks {
@@ -117,6 +156,40 @@ struct UpdateEntrySubtaskInput {
 #[serde(rename_all = "camelCase")]
 struct CloseTaskInput {
     task_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateSubtaskInput {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameSubtaskInput {
+    subtask_id: i64,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetSubtaskArchivedInput {
+    subtask_id: i64,
+    archived: bool,
+}
+
+/// Reported to the UI at startup so a failed migration can be explained
+/// instead of surfacing as an error on every action.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DatabaseStatus {
+    ok: bool,
+    /// Schema version this build reads and writes.
+    schema_version: i64,
+    /// Version found in the file, absent when it could not be read.
+    database_version: Option<i64>,
+    message: Option<String>,
+    backup_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,6 +228,18 @@ struct SummaryRow {
     subtask_name: Option<String>,
     github_kind: Option<String>,
     github_reference: Option<String>,
+    total_seconds: i64,
+    entry_count: i64,
+}
+
+/// Time spent on a subtask across every task, so questions like "how long did
+/// I spend reviewing code this month" have a single row to read.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubtaskSummaryRow {
+    subtask_id: Option<i64>,
+    subtask_name: Option<String>,
+    task_count: i64,
     total_seconds: i64,
     entry_count: i64,
 }
@@ -204,9 +289,49 @@ struct GithubIssue {
 }
 
 #[tauri::command]
+fn database_status(state: State<'_, AppState>) -> DatabaseStatus {
+    database_status_inner(&state)
+}
+
+#[tauri::command]
 fn list_tasks(state: State<'_, AppState>) -> Result<Vec<TaskWithSubtasks>, String> {
     let conn = state.connect().map_err(String::from)?;
     list_tasks_inner(&conn).map_err(String::from)
+}
+
+#[tauri::command]
+fn list_subtasks(state: State<'_, AppState>) -> Result<Vec<SubtaskView>, String> {
+    let conn = state.connect().map_err(String::from)?;
+    list_subtasks_inner(&conn).map_err(String::from)
+}
+
+#[tauri::command]
+fn create_subtask(
+    state: State<'_, AppState>,
+    input: CreateSubtaskInput,
+) -> Result<Vec<SubtaskView>, String> {
+    create_subtask_inner(&state, input).map_err(String::from)
+}
+
+#[tauri::command]
+fn rename_subtask(
+    state: State<'_, AppState>,
+    input: RenameSubtaskInput,
+    app: AppHandle,
+) -> Result<Vec<SubtaskView>, String> {
+    let subtasks = rename_subtask_inner(&state, input).map_err(String::from)?;
+    // A rename changes the label the tray and the recent entries show.
+    let _ = refresh_tray_status(&app);
+    let _ = app.emit("timer-updated", ());
+    Ok(subtasks)
+}
+
+#[tauri::command]
+fn set_subtask_archived(
+    state: State<'_, AppState>,
+    input: SetSubtaskArchivedInput,
+) -> Result<Vec<SubtaskView>, String> {
+    set_subtask_archived_inner(&state, input).map_err(String::from)
 }
 
 #[tauri::command]
@@ -292,10 +417,20 @@ fn summary_by_task(
 }
 
 #[tauri::command]
-fn summary_by_subtask(
+fn summary_by_task_and_subtask(
     state: State<'_, AppState>,
     period: Option<String>,
 ) -> Result<Vec<SummaryRow>, String> {
+    let conn = state.connect().map_err(String::from)?;
+    let range = report_range_for_period(period).map_err(String::from)?;
+    summary_by_task_and_subtask_inner(&conn, range.as_ref()).map_err(String::from)
+}
+
+#[tauri::command]
+fn summary_by_subtask(
+    state: State<'_, AppState>,
+    period: Option<String>,
+) -> Result<Vec<SubtaskSummaryRow>, String> {
     let conn = state.connect().map_err(String::from)?;
     let range = report_range_for_period(period).map_err(String::from)?;
     summary_by_subtask_inner(&conn, range.as_ref()).map_err(String::from)
@@ -331,11 +466,18 @@ pub fn run() {
                 .map_err(|_| TrackerError::MissingDataDir)?;
             std::fs::create_dir_all(&data_dir)?;
 
-            let state = AppState {
-                db_path: data_dir.join("tracker.sqlite3"),
-            };
-            configure_database(&state.connect()?)?;
-            app.manage(state);
+            // Bring the schema up to date before anything reads from it. A
+            // failure is recorded on the state rather than aborting startup,
+            // so the app can open and explain what happened.
+            let db_path = data_dir.join("tracker.sqlite3");
+            let prepared = db::prepare(&db_path);
+            let migration_error = prepared.result.err().map(|error| error.to_string());
+
+            app.manage(AppState {
+                db_path,
+                backup_path: prepared.backup_path,
+                migration_error,
+            });
             build_app_menu(app.handle())?;
             build_tray(app.handle())?;
             start_tray_status_updater(app.handle());
@@ -350,15 +492,21 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            database_status,
             list_tasks,
             create_task,
             close_task,
+            list_subtasks,
+            create_subtask,
+            rename_subtask,
+            set_subtask_archived,
             start_timer,
             stop_timer,
             get_active_timer,
             recent_entries,
             update_time_entry_subtask,
             summary_by_task,
+            summary_by_task_and_subtask,
             summary_by_subtask,
             search_github_references,
             get_github_token,
@@ -446,9 +594,9 @@ fn build_tray(app: &AppHandle) -> Result<(), TrackerError> {
 }
 
 fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, TrackerError> {
-    let state = app.state::<AppState>();
-    let conn = state.connect()?;
-    let tasks = list_tasks_inner(&conn)?;
+    // An unreadable database still gets a usable tray menu, just without the
+    // task shortcuts.
+    let tasks = tray_tasks(app).unwrap_or_default();
 
     let mut builder = MenuBuilder::new(app)
         .text("show", "Show Tracker")
@@ -469,6 +617,12 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, TrackerError> {
         .text("quit", "Quit")
         .build()
         .map_err(TrackerError::from)
+}
+
+fn tray_tasks(app: &AppHandle) -> Result<Vec<TaskWithSubtasks>, TrackerError> {
+    let state = app.state::<AppState>();
+    let conn = state.connect()?;
+    list_tasks_inner(&conn)
 }
 
 fn refresh_tray_menu(app: &AppHandle) -> Result<(), TrackerError> {
@@ -499,7 +653,9 @@ fn start_tray_status_updater(app: &AppHandle) {
 
 fn tray_status_label(app: &AppHandle) -> Result<String, TrackerError> {
     let state = app.state::<AppState>();
-    let conn = state.connect()?;
+    let Ok(conn) = state.connect() else {
+        return Ok("database error".to_owned());
+    };
     let Some(active) = active_timer_inner(&conn)? else {
         return Ok("stopped".to_owned());
     };
@@ -741,79 +897,25 @@ fn should_refresh_github_task_state(task: &Task) -> bool {
     checked_at.with_timezone(&Utc) < Utc::now() - ChronoDuration::minutes(30)
 }
 
-fn configure_database(conn: &Connection) -> Result<(), TrackerError> {
-    conn.execute_batch(
-        "
-        PRAGMA foreign_keys = ON;
+fn database_status_inner(state: &State<'_, AppState>) -> DatabaseStatus {
+    let backup_path = state
+        .backup_path
+        .as_ref()
+        .map(|path| path.display().to_string());
 
-        CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            github_kind TEXT,
-            github_reference TEXT,
-            github_state TEXT,
-            github_checked_at TEXT,
-            closed_at TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
+    // Read the version straight from the file, which works even when the
+    // migration that should have updated it failed.
+    let database_version = db::open(&state.db_path)
+        .and_then(|conn| db::schema_version(&conn))
+        .ok();
 
-        CREATE TABLE IF NOT EXISTS subtasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            UNIQUE(task_id, name),
-            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS time_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id INTEGER NOT NULL,
-            subtask_id INTEGER,
-            started_at TEXT NOT NULL,
-            ended_at TEXT,
-            note TEXT,
-            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-            FOREIGN KEY(subtask_id) REFERENCES subtasks(id) ON DELETE SET NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_time_entries_active
-            ON time_entries(ended_at)
-            WHERE ended_at IS NULL;
-
-        CREATE INDEX IF NOT EXISTS idx_time_entries_started_at
-            ON time_entries(started_at);
-        ",
-    )?;
-
-    ensure_column(conn, "tasks", "github_state", "TEXT")?;
-    ensure_column(conn, "tasks", "github_checked_at", "TEXT")?;
-    ensure_column(conn, "tasks", "closed_at", "TEXT")?;
-
-    Ok(())
-}
-
-fn ensure_column(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    column_type: &str,
-) -> Result<(), TrackerError> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-
-    for existing in columns {
-        if existing? == column {
-            return Ok(());
-        }
+    DatabaseStatus {
+        ok: state.migration_error.is_none(),
+        schema_version: db::SCHEMA_VERSION,
+        database_version,
+        message: state.migration_error.clone(),
+        backup_path,
     }
-
-    conn.execute(
-        &format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}"),
-        [],
-    )?;
-    Ok(())
 }
 
 fn create_task_inner(
@@ -919,7 +1021,7 @@ fn start_timer_inner(
 
     let task = upsert_task(&tx, &input.task, &now)?;
     let subtask = match normalize_optional(input.subtask_name) {
-        Some(name) => Some(upsert_subtask(&tx, task.id, &name, &now)?),
+        Some(name) => Some(upsert_subtask(&tx, &name, &now)?),
         None => None,
     };
 
@@ -1004,7 +1106,7 @@ fn active_timer_inner(conn: &Connection) -> Result<Option<ActiveTimer>, TrackerE
             SELECT e.id, e.started_at, e.note,
                    t.id, t.name, t.github_kind, t.github_reference,
                    t.github_state, t.github_checked_at, t.closed_at, t.created_at, t.updated_at,
-                   s.id, s.task_id, s.name, s.created_at
+                   s.id, s.name, s.archived_at, s.created_at
             FROM time_entries e
             JOIN tasks t ON t.id = e.task_id
             LEFT JOIN subtasks s ON s.id = e.subtask_id
@@ -1019,8 +1121,8 @@ fn active_timer_inner(conn: &Connection) -> Result<Option<ActiveTimer>, TrackerE
                 let subtask = match subtask_id {
                     Some(id) => Some(Subtask {
                         id,
-                        task_id: row.get(13)?,
-                        name: row.get(14)?,
+                        name: row.get(13)?,
+                        archived_at: row.get(14)?,
                         created_at: row.get(15)?,
                     }),
                     None => None,
@@ -1115,14 +1217,15 @@ fn update_time_entry_subtask_inner(
 
     {
         let tx = conn.transaction()?;
-        let task_id: i64 = tx.query_row(
-            "SELECT task_id FROM time_entries WHERE id = ?1",
+        // Fails when the entry has gone, before any subtask is created for it.
+        let _: i64 = tx.query_row(
+            "SELECT id FROM time_entries WHERE id = ?1",
             params![entry_id],
             |row| row.get(0),
         )?;
         let now = now_string();
         let subtask_id = match normalize_optional(input.subtask_name) {
-            Some(name) => Some(upsert_subtask(&tx, task_id, &name, &now)?.id),
+            Some(name) => Some(upsert_subtask(&tx, &name, &now)?.id),
             None => None,
         };
 
@@ -1166,7 +1269,7 @@ fn summary_by_task_inner(
     Ok(rows)
 }
 
-fn summary_by_subtask_inner(
+fn summary_by_task_and_subtask_inner(
     conn: &Connection,
     range: Option<&ReportRange>,
 ) -> Result<Vec<SummaryRow>, TrackerError> {
@@ -1200,6 +1303,46 @@ fn summary_by_subtask_inner(
             .cmp(&b.task_name)
             .then_with(|| b.total_seconds.cmp(&a.total_seconds))
     });
+    Ok(rows)
+}
+
+/// Totals time per subtask across every task. Entries without a subtask are
+/// collected into a single unnamed row.
+fn summary_by_subtask_inner(
+    conn: &Connection,
+    range: Option<&ReportRange>,
+) -> Result<Vec<SubtaskSummaryRow>, TrackerError> {
+    let entries = report_entries_inner(conn, range)?;
+    let mut rows: Vec<SubtaskSummaryRow> = Vec::new();
+    let mut task_ids: Vec<Vec<i64>> = Vec::new();
+
+    for entry in entries {
+        match rows
+            .iter()
+            .position(|row| row.subtask_id == entry.subtask_id)
+        {
+            Some(index) => {
+                rows[index].total_seconds += entry.duration_seconds;
+                rows[index].entry_count += 1;
+                if !task_ids[index].contains(&entry.task_id) {
+                    task_ids[index].push(entry.task_id);
+                    rows[index].task_count += 1;
+                }
+            }
+            None => {
+                rows.push(SubtaskSummaryRow {
+                    subtask_id: entry.subtask_id,
+                    subtask_name: entry.subtask_name,
+                    task_count: 1,
+                    total_seconds: entry.duration_seconds,
+                    entry_count: 1,
+                });
+                task_ids.push(vec![entry.task_id]);
+            }
+        }
+    }
+
+    rows.sort_by(|a, b| b.total_seconds.cmp(&a.total_seconds));
     Ok(rows)
 }
 
@@ -1255,25 +1398,177 @@ fn list_tasks_inner(conn: &Connection) -> Result<Vec<TaskWithSubtasks>, TrackerE
     Ok(tasks)
 }
 
+/// The subtasks already recorded against a task, most recently used first.
+///
+/// Subtasks are shared now, so this reads the task's history of use rather than
+/// a set of subtasks belonging to it.
 fn subtasks_for_task(conn: &Connection, task_id: i64) -> Result<Vec<Subtask>, TrackerError> {
     let mut stmt = conn.prepare(
         "
-        SELECT id, task_id, name, created_at
-        FROM subtasks
-        WHERE task_id = ?1
-        ORDER BY name ASC
+        SELECT s.id, s.name, s.archived_at, s.created_at, MAX(e.started_at) AS last_used
+        FROM time_entries e
+        JOIN subtasks s ON s.id = e.subtask_id
+        WHERE e.task_id = ?1
+        GROUP BY s.id
+        ORDER BY last_used DESC
         ",
     )?;
     let rows = stmt.query_map(params![task_id], |row| {
         Ok(Subtask {
             id: row.get(0)?,
-            task_id: row.get(1)?,
-            name: row.get(2)?,
+            name: row.get(1)?,
+            archived_at: row.get(2)?,
             created_at: row.get(3)?,
         })
     })?;
 
     collect_rows(rows)
+}
+
+/// Every subtask, with how much time has been recorded against it.
+fn list_subtasks_inner(conn: &Connection) -> Result<Vec<SubtaskView>, TrackerError> {
+    let mut views: Vec<SubtaskView> = all_subtasks(conn)?
+        .into_iter()
+        .map(|subtask| SubtaskView {
+            id: subtask.id,
+            name: subtask.name,
+            archived_at: subtask.archived_at,
+            created_at: subtask.created_at,
+            entry_count: 0,
+            total_seconds: 0,
+        })
+        .collect();
+
+    for entry in report_entries_inner(conn, None)? {
+        let Some(subtask_id) = entry.subtask_id else {
+            continue;
+        };
+        if let Some(view) = views.iter_mut().find(|view| view.id == subtask_id) {
+            view.entry_count += 1;
+            view.total_seconds += entry.duration_seconds;
+        }
+    }
+
+    Ok(views)
+}
+
+fn all_subtasks(conn: &Connection) -> Result<Vec<Subtask>, TrackerError> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT id, name, archived_at, created_at
+        FROM subtasks
+        ORDER BY name ASC
+        ",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(Subtask {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            archived_at: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    })?;
+
+    collect_rows(rows)
+}
+
+fn create_subtask_inner(
+    state: &State<'_, AppState>,
+    input: CreateSubtaskInput,
+) -> Result<Vec<SubtaskView>, TrackerError> {
+    let mut conn = state.connect()?;
+    create_subtask_conn(&mut conn, input)
+}
+
+fn create_subtask_conn(
+    conn: &mut Connection,
+    input: CreateSubtaskInput,
+) -> Result<Vec<SubtaskView>, TrackerError> {
+    let tx = conn.transaction()?;
+    upsert_subtask(&tx, &input.name, &now_string())?;
+    tx.commit()?;
+
+    list_subtasks_inner(conn)
+}
+
+fn rename_subtask_inner(
+    state: &State<'_, AppState>,
+    input: RenameSubtaskInput,
+) -> Result<Vec<SubtaskView>, TrackerError> {
+    let mut conn = state.connect()?;
+    rename_subtask_conn(&mut conn, input)
+}
+
+/// Renames a subtask, merging it into an existing one when the new name is
+/// already taken. Merging repoints that subtask's time entries, so no recorded
+/// time is lost.
+fn rename_subtask_conn(
+    conn: &mut Connection,
+    input: RenameSubtaskInput,
+) -> Result<Vec<SubtaskView>, TrackerError> {
+    let display_name = normalize_subtask_name(&input.name);
+    let name_key = subtask_name_key(&display_name);
+    if name_key.is_empty() {
+        return Err(TrackerError::MissingSubtaskName);
+    }
+
+    {
+        let tx = conn.transaction()?;
+        let existing_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM subtasks WHERE name_key = ?1 AND id <> ?2",
+                params![name_key, input.subtask_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        match existing_id {
+            Some(target_id) => {
+                tx.execute(
+                    "UPDATE time_entries SET subtask_id = ?1 WHERE subtask_id = ?2",
+                    params![target_id, input.subtask_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM subtasks WHERE id = ?1",
+                    params![input.subtask_id],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "UPDATE subtasks SET name = ?1, name_key = ?2 WHERE id = ?3",
+                    params![display_name, name_key, input.subtask_id],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+    }
+
+    list_subtasks_inner(conn)
+}
+
+fn set_subtask_archived_inner(
+    state: &State<'_, AppState>,
+    input: SetSubtaskArchivedInput,
+) -> Result<Vec<SubtaskView>, TrackerError> {
+    let conn = state.connect()?;
+    set_subtask_archived_conn(&conn, input)
+}
+
+/// Archives or restores a subtask. Archiving hides it from the pickers while
+/// leaving its recorded time in reports.
+fn set_subtask_archived_conn(
+    conn: &Connection,
+    input: SetSubtaskArchivedInput,
+) -> Result<Vec<SubtaskView>, TrackerError> {
+    let archived_at = input.archived.then(now_string);
+
+    conn.execute(
+        "UPDATE subtasks SET archived_at = ?1 WHERE id = ?2",
+        params![archived_at, input.subtask_id],
+    )?;
+
+    list_subtasks_inner(conn)
 }
 
 fn latest_subtask_name_for_task(
@@ -1361,26 +1656,37 @@ fn upsert_task(tx: &Transaction<'_>, input: &TaskInput, now: &str) -> Result<Tas
     task_by_id(tx, id)
 }
 
-fn upsert_subtask(
-    tx: &Transaction<'_>,
-    task_id: i64,
-    name: &str,
-    now: &str,
-) -> Result<Subtask, TrackerError> {
+/// Finds or creates a shared subtask by name.
+///
+/// Names that differ only in case or whitespace resolve to the same subtask.
+/// Naming an archived subtask brings it back, since it is clearly in use again.
+fn upsert_subtask(tx: &Transaction<'_>, name: &str, now: &str) -> Result<Subtask, TrackerError> {
+    let display_name = normalize_subtask_name(name);
+    let name_key = subtask_name_key(&display_name);
+    if name_key.is_empty() {
+        return Err(TrackerError::MissingSubtaskName);
+    }
+
     let existing_id: Option<i64> = tx
         .query_row(
-            "SELECT id FROM subtasks WHERE task_id = ?1 AND name = ?2",
-            params![task_id, name],
+            "SELECT id FROM subtasks WHERE name_key = ?1",
+            params![name_key],
             |row| row.get(0),
         )
         .optional()?;
 
     let id = match existing_id {
-        Some(id) => id,
+        Some(id) => {
+            tx.execute(
+                "UPDATE subtasks SET archived_at = NULL WHERE id = ?1",
+                params![id],
+            )?;
+            id
+        }
         None => {
             tx.execute(
-                "INSERT INTO subtasks (task_id, name, created_at) VALUES (?1, ?2, ?3)",
-                params![task_id, name, now],
+                "INSERT INTO subtasks (name, name_key, created_at) VALUES (?1, ?2, ?3)",
+                params![display_name, name_key, now],
             )?;
             tx.last_insert_rowid()
         }
@@ -1451,13 +1757,13 @@ fn task_by_id_conn(conn: &Connection, id: i64) -> Result<Task, TrackerError> {
 
 fn subtask_by_id(tx: &Transaction<'_>, id: i64) -> Result<Subtask, TrackerError> {
     tx.query_row(
-        "SELECT id, task_id, name, created_at FROM subtasks WHERE id = ?1",
+        "SELECT id, name, archived_at, created_at FROM subtasks WHERE id = ?1",
         params![id],
         |row| {
             Ok(Subtask {
                 id: row.get(0)?,
-                task_id: row.get(1)?,
-                name: row.get(2)?,
+                name: row.get(1)?,
+                archived_at: row.get(2)?,
                 created_at: row.get(3)?,
             })
         },
@@ -1591,6 +1897,18 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+/// The stored form of a subtask name: trimmed, with runs of whitespace
+/// collapsed to single spaces.
+fn normalize_subtask_name(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The value a subtask name is deduplicated on. Two names that differ only in
+/// case or whitespace share a key and therefore share a subtask.
+fn subtask_name_key(value: &str) -> String {
+    normalize_subtask_name(value).to_lowercase()
+}
+
 fn now_string() -> String {
     format_utc(Utc::now())
 }
@@ -1606,7 +1924,9 @@ mod tests {
 
     fn memory_conn() -> Connection {
         let conn = Connection::open_in_memory().expect("open in-memory database");
-        configure_database(&conn).expect("configure database");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("enable foreign keys");
+        db::create_latest_schema(&conn).expect("create schema");
         conn
     }
 
@@ -1675,6 +1995,283 @@ mod tests {
             )
             .expect("read ended_at");
         assert!(ended_at.is_some());
+    }
+
+    fn upsert_test_subtask(conn: &mut Connection, name: &str) -> Subtask {
+        let tx = conn.transaction().expect("begin transaction");
+        let subtask = upsert_subtask(&tx, name, &now_string()).expect("upsert subtask");
+        tx.commit().expect("commit transaction");
+        subtask
+    }
+
+    /// Records a finished entry of `minutes` against a task and optional subtask.
+    fn insert_test_entry(
+        conn: &Connection,
+        task_id: i64,
+        subtask_id: Option<i64>,
+        minutes: i64,
+    ) -> i64 {
+        let started_at = Utc::now() - ChronoDuration::minutes(minutes);
+        conn.execute(
+            "
+            INSERT INTO time_entries (task_id, subtask_id, started_at, ended_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ",
+            params![
+                task_id,
+                subtask_id,
+                format_utc(started_at),
+                format_utc(Utc::now())
+            ],
+        )
+        .expect("insert time entry");
+        conn.last_insert_rowid()
+    }
+
+    fn subtask_view(views: &[SubtaskView], name: &str) -> SubtaskView {
+        views
+            .iter()
+            .find(|view| view.name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("expected a subtask named {name}"))
+    }
+
+    #[test]
+    fn subtask_names_are_shared_between_tasks() {
+        let mut conn = memory_conn();
+        create_test_task(&mut conn, "First task");
+        create_test_task(&mut conn, "Second task");
+
+        let first = upsert_test_subtask(&mut conn, "Review");
+        let second = upsert_test_subtask(&mut conn, "Review");
+
+        assert_eq!(
+            first.id, second.id,
+            "the same name should resolve to one shared subtask"
+        );
+        assert_eq!(all_subtasks(&conn).expect("list subtasks").len(), 1);
+    }
+
+    #[test]
+    fn subtask_names_ignore_case_and_surrounding_whitespace() {
+        let mut conn = memory_conn();
+
+        let canonical = upsert_test_subtask(&mut conn, "Code review");
+
+        for variant in ["code review", "  Code   review  ", "CODE REVIEW"] {
+            let subtask = upsert_test_subtask(&mut conn, variant);
+            assert_eq!(subtask.id, canonical.id, "{variant} should merge");
+        }
+
+        let subtasks = all_subtasks(&conn).expect("list subtasks");
+        assert_eq!(subtasks.len(), 1);
+        assert_eq!(
+            subtasks[0].name, "Code review",
+            "the first spelling should be kept"
+        );
+    }
+
+    #[test]
+    fn blank_subtask_names_are_rejected() {
+        let mut conn = memory_conn();
+        let tx = conn.transaction().expect("begin transaction");
+
+        let error = upsert_subtask(&tx, "   ", &now_string());
+
+        assert!(matches!(error, Err(TrackerError::MissingSubtaskName)));
+    }
+
+    #[test]
+    fn naming_an_archived_subtask_brings_it_back() {
+        let mut conn = memory_conn();
+        let subtask = upsert_test_subtask(&mut conn, "Deploy");
+        set_subtask_archived_conn(
+            &conn,
+            SetSubtaskArchivedInput {
+                subtask_id: subtask.id,
+                archived: true,
+            },
+        )
+        .expect("archive subtask");
+
+        let revived = upsert_test_subtask(&mut conn, "deploy");
+
+        assert_eq!(revived.id, subtask.id);
+        assert!(revived.archived_at.is_none());
+    }
+
+    #[test]
+    fn archiving_a_subtask_keeps_its_recorded_time() {
+        let mut conn = memory_conn();
+        let task = create_test_task(&mut conn, "First task");
+        let subtask = upsert_test_subtask(&mut conn, "Deploy");
+        insert_test_entry(&conn, task.id, Some(subtask.id), 30);
+
+        let views = set_subtask_archived_conn(
+            &conn,
+            SetSubtaskArchivedInput {
+                subtask_id: subtask.id,
+                archived: true,
+            },
+        )
+        .expect("archive subtask");
+
+        let view = subtask_view(&views, "Deploy");
+        assert!(view.archived_at.is_some());
+        assert_eq!(view.entry_count, 1);
+        assert!(view.total_seconds >= 1800);
+    }
+
+    #[test]
+    fn renaming_a_subtask_keeps_its_entries() {
+        let mut conn = memory_conn();
+        let task = create_test_task(&mut conn, "First task");
+        let subtask = upsert_test_subtask(&mut conn, "Reviewing");
+        let entry_id = insert_test_entry(&conn, task.id, Some(subtask.id), 15);
+
+        let views = rename_subtask_conn(
+            &mut conn,
+            RenameSubtaskInput {
+                subtask_id: subtask.id,
+                name: "Code review".to_owned(),
+            },
+        )
+        .expect("rename subtask");
+
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].name, "Code review");
+        assert_eq!(
+            entry_view_by_id(&conn, entry_id)
+                .expect("read entry")
+                .subtask_name
+                .as_deref(),
+            Some("Code review")
+        );
+    }
+
+    #[test]
+    fn renaming_onto_an_existing_name_merges_the_two_subtasks() {
+        let mut conn = memory_conn();
+        let task = create_test_task(&mut conn, "First task");
+        let review = upsert_test_subtask(&mut conn, "Review");
+        let reviewing = upsert_test_subtask(&mut conn, "Reviewing");
+        let review_entry = insert_test_entry(&conn, task.id, Some(review.id), 20);
+        let reviewing_entry = insert_test_entry(&conn, task.id, Some(reviewing.id), 40);
+
+        let views = rename_subtask_conn(
+            &mut conn,
+            RenameSubtaskInput {
+                subtask_id: reviewing.id,
+                name: "review".to_owned(),
+            },
+        )
+        .expect("rename subtask");
+
+        assert_eq!(views.len(), 1, "the two subtasks should have merged");
+        let view = subtask_view(&views, "Review");
+        assert_eq!(view.id, review.id);
+        assert_eq!(view.entry_count, 2, "both entries should have moved across");
+
+        for entry_id in [review_entry, reviewing_entry] {
+            assert_eq!(
+                entry_view_by_id(&conn, entry_id)
+                    .expect("read entry")
+                    .subtask_id,
+                Some(review.id)
+            );
+        }
+    }
+
+    #[test]
+    fn creating_an_existing_subtask_does_not_duplicate_it() {
+        let mut conn = memory_conn();
+
+        create_subtask_conn(
+            &mut conn,
+            CreateSubtaskInput {
+                name: "Review".to_owned(),
+            },
+        )
+        .expect("create subtask");
+        let views = create_subtask_conn(
+            &mut conn,
+            CreateSubtaskInput {
+                name: " review ".to_owned(),
+            },
+        )
+        .expect("create subtask again");
+
+        assert_eq!(views.len(), 1);
+    }
+
+    #[test]
+    fn subtask_report_totals_time_across_every_task() {
+        let mut conn = memory_conn();
+        let first = create_test_task(&mut conn, "First task");
+        let second = create_test_task(&mut conn, "Second task");
+        let review = upsert_test_subtask(&mut conn, "Review");
+        let deploy = upsert_test_subtask(&mut conn, "Deploy");
+        insert_test_entry(&conn, first.id, Some(review.id), 30);
+        insert_test_entry(&conn, second.id, Some(review.id), 60);
+        insert_test_entry(&conn, first.id, Some(deploy.id), 10);
+        insert_test_entry(&conn, first.id, None, 5);
+
+        let rows = summary_by_subtask_inner(&conn, None).expect("subtask summary");
+
+        assert_eq!(rows.len(), 3, "two subtasks plus the unlabelled entry");
+        let review_row = &rows[0];
+        assert_eq!(review_row.subtask_name.as_deref(), Some("Review"));
+        assert_eq!(review_row.entry_count, 2);
+        assert_eq!(review_row.task_count, 2, "the subtask spans both tasks");
+        assert!(review_row.total_seconds >= 5400);
+
+        let unlabelled = rows
+            .iter()
+            .find(|row| row.subtask_id.is_none())
+            .expect("a row for entries without a subtask");
+        assert_eq!(unlabelled.entry_count, 1);
+    }
+
+    #[test]
+    fn task_subtask_report_still_separates_the_same_subtask_per_task() {
+        let mut conn = memory_conn();
+        let first = create_test_task(&mut conn, "First task");
+        let second = create_test_task(&mut conn, "Second task");
+        let review = upsert_test_subtask(&mut conn, "Review");
+        insert_test_entry(&conn, first.id, Some(review.id), 30);
+        insert_test_entry(&conn, second.id, Some(review.id), 60);
+
+        let rows = summary_by_task_and_subtask_inner(&conn, None).expect("task summary");
+
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|row| row.subtask_name.as_deref() == Some("Review"))
+        );
+    }
+
+    #[test]
+    fn task_subtask_suggestions_list_recently_used_subtasks_first() {
+        let mut conn = memory_conn();
+        let task = create_test_task(&mut conn, "First task");
+        let other = create_test_task(&mut conn, "Second task");
+        let review = upsert_test_subtask(&mut conn, "Review");
+        let deploy = upsert_test_subtask(&mut conn, "Deploy");
+        let unused = upsert_test_subtask(&mut conn, "Unused here");
+        insert_test_entry(&conn, task.id, Some(review.id), 90);
+        insert_test_entry(&conn, task.id, Some(deploy.id), 10);
+        insert_test_entry(&conn, other.id, Some(unused.id), 10);
+
+        let subtasks = subtasks_for_task(&conn, task.id).expect("task subtasks");
+
+        assert_eq!(
+            subtasks
+                .iter()
+                .map(|subtask| subtask.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Deploy", "Review"],
+            "most recently used first, and only this task's subtasks"
+        );
     }
 
     #[test]

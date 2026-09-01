@@ -21,7 +21,15 @@ const subtaskSuggestions = document.querySelector("#subtaskSuggestions");
 const note = document.querySelector("#note");
 const recentRows = document.querySelector("#recentRows");
 const summaryRows = document.querySelector("#summaryRows");
-const summarySubtaskHeader = document.querySelector("#summarySubtaskHeader");
+const summaryHeader = document.querySelector("#summaryHeader");
+const subtaskRows = document.querySelector("#subtaskRows");
+const newSubtaskName = document.querySelector("#newSubtaskName");
+const addSubtaskButton = document.querySelector("#addSubtaskButton");
+const subtaskStatus = document.querySelector("#subtaskStatus");
+const databaseErrorDialog = document.querySelector("#databaseErrorDialog");
+const databaseErrorMessage = document.querySelector("#databaseErrorMessage");
+const databaseErrorBackup = document.querySelector("#databaseErrorBackup");
+const databaseErrorClose = document.querySelector("#databaseErrorClose");
 const reportAllTimePeriod = document.querySelector("#reportAllTimePeriod");
 const reportTodayPeriod = document.querySelector("#reportTodayPeriod");
 const reportThisWeekPeriod = document.querySelector("#reportThisWeekPeriod");
@@ -30,6 +38,7 @@ const reportThisMonthPeriod = document.querySelector("#reportThisMonthPeriod");
 const reportTotalDuration = document.querySelector("#reportTotalDuration");
 const reportTaskMode = document.querySelector("#reportTaskMode");
 const reportSubtaskMode = document.querySelector("#reportSubtaskMode");
+const reportTaskSubtaskMode = document.querySelector("#reportTaskSubtaskMode");
 const createTaskDialog = document.querySelector("#createTaskDialog");
 const createTaskClose = document.querySelector("#createTaskClose");
 const createTaskCancel = document.querySelector("#createTaskCancel");
@@ -46,8 +55,16 @@ const createImportResults = document.querySelector("#createImportResults");
 
 const LEGACY_GITHUB_TOKEN_STORAGE_KEY = "tracker.githubToken";
 
+/// Column headings for each report grouping, in render order.
+const REPORT_COLUMNS = {
+  task: ["Task", "Reference", "Entries", "Total"],
+  subtask: ["Subtask", "Tasks", "Entries", "Total"],
+  taskSubtask: ["Task", "Subtask", "Reference", "Entries", "Total"],
+};
+
 let activeTimer = null;
 let taskItems = [];
+let subtaskItems = [];
 let pendingSelectedTaskId = null;
 let tickHandle = null;
 let createTaskMode = "free";
@@ -58,6 +75,7 @@ let reportPeriod = "all";
 let reportMode = "task";
 let taskSummaryRows = [];
 let subtaskSummaryRows = [];
+let taskSubtaskSummaryRows = [];
 let pendingCloseTaskId = null;
 let pendingCloseResetHandle = null;
 
@@ -137,36 +155,41 @@ function selectedTaskItem() {
   return taskItems.find((item) => String(item.task.id) === taskSelect.value) ?? null;
 }
 
+/// Subtasks already recorded against a task, most recently used first.
 function subtasksForTask(taskId) {
   return taskItems.find((item) => item.task.id === taskId)?.subtasks ?? [];
 }
 
-function orderedSubtaskSuggestions() {
-  const selectedTask = selectedTaskItem();
-  const selectedTaskNames = selectedTask?.subtasks.map((subtask) => subtask.name) ?? [];
-  const otherNames = taskItems.flatMap((item) =>
-    item.task.id === selectedTask?.task.id ? [] : item.subtasks.map((subtask) => subtask.name),
-  );
+function activeSubtaskNames() {
+  return subtaskItems.filter((subtask) => !subtask.archivedAt).map((subtask) => subtask.name);
+}
+
+/// Names to offer for a task: the ones already used on it, then the rest of the
+/// shared list. Archived subtasks are only offered if the task has used them.
+function orderedSubtaskSuggestions(taskId) {
+  const usedNames = subtasksForTask(taskId).map((subtask) => subtask.name);
   const seen = new Set();
 
-  return [...selectedTaskNames, ...otherNames]
-    .map((name) => name.trim())
-    .filter((name) => {
-      const key = name.toLowerCase();
-      if (!name || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+  return [...usedNames, ...activeSubtaskNames()].filter((name) => {
+    const key = name.toLowerCase();
+    if (!name || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function renderSubtaskOptions(datalist, taskId) {
+  datalist.innerHTML = "";
+
+  for (const name of orderedSubtaskSuggestions(taskId)) {
+    const option = document.createElement("option");
+    option.value = name;
+    datalist.append(option);
+  }
 }
 
 function renderSubtaskSuggestions() {
-  subtaskSuggestions.innerHTML = "";
-
-  for (const name of orderedSubtaskSuggestions()) {
-    const option = document.createElement("option");
-    option.value = name;
-    subtaskSuggestions.append(option);
-  }
+  renderSubtaskOptions(subtaskSuggestions, selectedTaskItem()?.task.id);
 }
 
 function updateSelectedTaskDetails() {
@@ -238,11 +261,7 @@ function renderRecent(entries) {
 
     const datalist = document.createElement("datalist");
     datalist.id = listId;
-    for (const subtask of subtasksForTask(entry.taskId)) {
-      const option = document.createElement("option");
-      option.value = subtask.name;
-      datalist.append(option);
-    }
+    renderSubtaskOptions(datalist, entry.taskId);
 
     const syncSaveState = () => {
       saveSubtask.disabled = subtaskInput.value.trim() === (entry.subtaskName ?? "");
@@ -282,36 +301,64 @@ function renderRecent(entries) {
   }
 }
 
+function summaryRowsForMode() {
+  if (reportMode === "subtask") return subtaskSummaryRows;
+  if (reportMode === "taskSubtask") return taskSubtaskSummaryRows;
+  return taskSummaryRows;
+}
+
+/// Cells for one summary row, matching REPORT_COLUMNS for the current mode.
+function summaryCells(item) {
+  const subtask = `<td class="muted">${escapeHtml(item.subtaskName ?? "No subtask")}</td>`;
+  const entries = `<td class="mono">${item.entryCount}</td>`;
+  const total = `<td class="mono">${formatDuration(item.totalSeconds)}</td>`;
+
+  if (reportMode === "subtask") {
+    return `
+      <td>${escapeHtml(item.subtaskName ?? "No subtask")}</td>
+      <td class="mono">${item.taskCount}</td>
+      ${entries}
+      ${total}
+    `;
+  }
+
+  const task = `<td>${escapeHtml(item.taskName)}</td>`;
+  const reference = `<td class="muted">${escapeHtml(referenceLabel(item))}</td>`;
+
+  if (reportMode === "taskSubtask") {
+    return `${task}${subtask}${reference}${entries}${total}`;
+  }
+
+  return `${task}${reference}${entries}${total}`;
+}
+
 function renderSummary() {
-  const isDetailed = reportMode === "subtask";
-  const rows = isDetailed ? subtaskSummaryRows : taskSummaryRows;
-  summarySubtaskHeader.hidden = !isDetailed;
+  const rows = summaryRowsForMode();
+  const columns = REPORT_COLUMNS[reportMode];
+
   reportAllTimePeriod.classList.toggle("active", reportPeriod === "all");
   reportTodayPeriod.classList.toggle("active", reportPeriod === "today");
   reportThisWeekPeriod.classList.toggle("active", reportPeriod === "this_week");
   reportLastWeekPeriod.classList.toggle("active", reportPeriod === "last_week");
   reportThisMonthPeriod.classList.toggle("active", reportPeriod === "this_month");
-  reportTaskMode.classList.toggle("active", !isDetailed);
-  reportSubtaskMode.classList.toggle("active", isDetailed);
+  reportTaskMode.classList.toggle("active", reportMode === "task");
+  reportSubtaskMode.classList.toggle("active", reportMode === "subtask");
+  reportTaskSubtaskMode.classList.toggle("active", reportMode === "taskSubtask");
   reportTotalDuration.textContent = formatDuration(
     rows.reduce((total, item) => total + item.totalSeconds, 0),
   );
+
+  summaryHeader.innerHTML = `<tr>${columns.map((name) => `<th>${name}</th>`).join("")}</tr>`;
   summaryRows.innerHTML = "";
 
   if (!rows.length) {
-    summaryRows.innerHTML = `<tr><td colspan="${isDetailed ? 5 : 4}" class="muted">No report data yet.</td></tr>`;
+    summaryRows.innerHTML = `<tr><td colspan="${columns.length}" class="muted">No report data yet.</td></tr>`;
     return;
   }
 
   for (const item of rows) {
     const row = document.createElement("tr");
-    row.innerHTML = `
-      <td>${escapeHtml(item.taskName)}</td>
-      ${isDetailed ? `<td class="muted">${escapeHtml(item.subtaskName ?? "No subtask")}</td>` : ""}
-      <td class="muted">${escapeHtml(referenceLabel(item))}</td>
-      <td class="mono">${item.entryCount}</td>
-      <td class="mono">${formatDuration(item.totalSeconds)}</td>
-    `;
+    row.innerHTML = summaryCells(item);
     summaryRows.append(row);
   }
 }
@@ -319,6 +366,183 @@ function renderSummary() {
 function setReportMode(mode) {
   reportMode = mode;
   renderSummary();
+}
+
+/// Matches how the backend deduplicates subtask names.
+function subtaskKey(name) {
+  return name.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/// The subtask a rename would merge into, if the new name is already taken.
+function mergeTargetFor(subtask, name) {
+  const key = subtaskKey(name);
+  return subtaskItems.find((item) => item.id !== subtask.id && subtaskKey(item.name) === key);
+}
+
+/// One row of the subtask manager: rename in place, archive or restore.
+function renderSubtaskRow(subtask) {
+  const row = document.createElement("tr");
+  const nameCell = document.createElement("td");
+  const editor = document.createElement("div");
+  const nameInput = document.createElement("input");
+  const saveButton = document.createElement("button");
+  const actionCell = document.createElement("td");
+  const archiveButton = document.createElement("button");
+  const isArchived = Boolean(subtask.archivedAt);
+  let confirmMergeHandle = null;
+  let awaitingMergeConfirmation = false;
+
+  editor.className = "inline-edit";
+  nameInput.type = "text";
+  nameInput.value = subtask.name;
+  nameInput.setAttribute("aria-label", `Name for ${subtask.name}`);
+  saveButton.type = "button";
+  saveButton.className = "secondary compact";
+  saveButton.textContent = "Rename";
+  saveButton.disabled = true;
+
+  const resetMergeConfirmation = () => {
+    window.clearTimeout(confirmMergeHandle);
+    confirmMergeHandle = null;
+    awaitingMergeConfirmation = false;
+  };
+
+  const syncSaveState = () => {
+    const value = nameInput.value.trim();
+    resetMergeConfirmation();
+    saveButton.disabled = !value || value === subtask.name;
+    saveButton.textContent = mergeTargetFor(subtask, value) ? "Merge" : "Rename";
+  };
+
+  // Merging pools two subtasks' entries and cannot be undone, so it takes a
+  // second click to confirm.
+  const submit = async () => {
+    if (saveButton.disabled) return;
+
+    const target = mergeTargetFor(subtask, nameInput.value);
+    if (target && !awaitingMergeConfirmation) {
+      awaitingMergeConfirmation = true;
+      saveButton.textContent = "Confirm merge";
+      subtaskStatus.textContent = `Merging moves every entry from "${subtask.name}" onto "${target.name}".`;
+      confirmMergeHandle = window.setTimeout(() => {
+        resetMergeConfirmation();
+        saveButton.textContent = "Merge";
+      }, 4000);
+      return;
+    }
+
+    resetMergeConfirmation();
+    saveButton.disabled = true;
+    await runSubtaskAction(
+      () => invoke("rename_subtask", { input: { subtaskId: subtask.id, name: nameInput.value } }),
+      target
+        ? `Merged "${subtask.name}" into "${target.name}".`
+        : `Renamed "${subtask.name}" to "${nameInput.value.trim()}".`,
+    );
+  };
+
+  nameInput.addEventListener("input", syncSaveState);
+  nameInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submit();
+    }
+  });
+  saveButton.addEventListener("click", submit);
+  editor.append(nameInput, saveButton);
+  nameCell.append(editor);
+
+  archiveButton.type = "button";
+  archiveButton.className = "secondary compact";
+  archiveButton.textContent = isArchived ? "Restore" : "Archive";
+  archiveButton.addEventListener("click", () =>
+    runSubtaskAction(
+      () =>
+        invoke("set_subtask_archived", {
+          input: { subtaskId: subtask.id, archived: !isArchived },
+        }),
+      isArchived ? `Restored "${subtask.name}".` : `Archived "${subtask.name}".`,
+    ),
+  );
+  actionCell.append(archiveButton);
+
+  row.innerHTML = `
+    <td class="mono">${subtask.entryCount}</td>
+    <td class="mono">${formatDuration(subtask.totalSeconds)}</td>
+  `;
+  row.prepend(nameCell);
+  row.append(actionCell);
+
+  if (isArchived) {
+    row.classList.add("archived");
+    nameCell.append(archivedBadge());
+  }
+
+  return row;
+}
+
+function archivedBadge() {
+  const badge = document.createElement("span");
+  badge.className = "badge";
+  badge.textContent = "Archived";
+  return badge;
+}
+
+function renderSubtaskManager() {
+  subtaskRows.innerHTML = "";
+
+  if (!subtaskItems.length) {
+    subtaskRows.innerHTML = `<tr><td colspan="4" class="muted">No subtasks yet. Start a timer with a subtask name, or add one above.</td></tr>`;
+    return;
+  }
+
+  // Archived subtasks sink to the bottom; the rest keep the backend's ordering.
+  const ordered = [
+    ...subtaskItems.filter((subtask) => !subtask.archivedAt),
+    ...subtaskItems.filter((subtask) => subtask.archivedAt),
+  ];
+
+  for (const subtask of ordered) {
+    subtaskRows.append(renderSubtaskRow(subtask));
+  }
+}
+
+/// Runs a subtask edit, reporting the outcome in the manager's status line.
+/// Returns whether it succeeded.
+async function runSubtaskAction(action, successMessage) {
+  subtaskStatus.textContent = "";
+  try {
+    subtaskItems = await action();
+    subtaskStatus.textContent = successMessage;
+    renderSubtaskManager();
+    renderSubtaskSuggestions();
+    await refresh();
+    return true;
+  } catch (error) {
+    subtaskStatus.textContent = String(error);
+    renderSubtaskManager();
+    return false;
+  }
+}
+
+async function addSubtask() {
+  const name = newSubtaskName.value.trim();
+  if (!name) {
+    subtaskStatus.textContent = "A subtask name is required.";
+    return;
+  }
+
+  addSubtaskButton.disabled = true;
+  const added = await runSubtaskAction(
+    () => invoke("create_subtask", { input: { name } }),
+    `Added "${name}".`,
+  );
+  addSubtaskButton.disabled = false;
+
+  if (added) {
+    newSubtaskName.value = "";
+  }
+  newSubtaskName.focus();
 }
 
 async function setReportPeriod(period) {
@@ -599,21 +823,47 @@ function renderCreateImportResults(results) {
 }
 
 async function refresh() {
-  const [tasks, active, entries, taskSummary, subtaskSummary] = await Promise.all([
-    invoke("list_tasks"),
-    invoke("get_active_timer"),
-    invoke("recent_entries", { limit: 50 }),
-    invoke("summary_by_task", { period: reportPeriod }),
-    invoke("summary_by_subtask", { period: reportPeriod }),
-  ]);
+  const [tasks, subtasks, active, entries, taskSummary, subtaskSummary, taskSubtaskSummary] =
+    await Promise.all([
+      invoke("list_tasks"),
+      invoke("list_subtasks"),
+      invoke("get_active_timer"),
+      invoke("recent_entries", { limit: 50 }),
+      invoke("summary_by_task", { period: reportPeriod }),
+      invoke("summary_by_subtask", { period: reportPeriod }),
+      invoke("summary_by_task_and_subtask", { period: reportPeriod }),
+    ]);
 
   activeTimer = active;
+  subtaskItems = subtasks;
   taskSummaryRows = taskSummary;
   subtaskSummaryRows = subtaskSummary;
+  taskSubtaskSummaryRows = taskSubtaskSummary;
   renderTaskOptions(tasks);
   renderActiveTimer();
   renderRecent(entries);
   renderSummary();
+  renderSubtaskManager();
+}
+
+function asSentence(value) {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
+/// Reports a schema migration that could not be completed. Everything else in
+/// the app will fail while this is the case, so say so once and clearly.
+async function checkDatabaseStatus() {
+  const status = await invoke("database_status");
+  if (status.ok) return true;
+
+  databaseErrorMessage.textContent = asSentence(
+    status.message ?? "The database could not be opened.",
+  );
+  databaseErrorBackup.textContent = status.backupPath
+    ? `Your data has not been changed. A copy of it from before the update is at ${status.backupPath}`
+    : "Your data has not been changed.";
+  databaseErrorDialog.hidden = false;
+  return false;
 }
 
 timerForm.addEventListener("submit", async (event) => {
@@ -653,6 +903,17 @@ reportLastWeekPeriod.addEventListener("click", () => setReportPeriod("last_week"
 reportThisMonthPeriod.addEventListener("click", () => setReportPeriod("this_month"));
 reportTaskMode.addEventListener("click", () => setReportMode("task"));
 reportSubtaskMode.addEventListener("click", () => setReportMode("subtask"));
+reportTaskSubtaskMode.addEventListener("click", () => setReportMode("taskSubtask"));
+addSubtaskButton.addEventListener("click", addSubtask);
+newSubtaskName.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    addSubtask();
+  }
+});
+databaseErrorClose.addEventListener("click", () => {
+  databaseErrorDialog.hidden = true;
+});
 stopButton.addEventListener("click", async () => {
   await invoke("stop_timer");
   await refresh();
@@ -694,8 +955,26 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !githubTokenDialog.hidden) closeGithubTokenDialog();
 });
 
-await listen("timer-updated", refresh);
+/// Refresh for event listeners, where a rejected promise has nowhere to go.
+async function refreshSafely() {
+  try {
+    await refresh();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+await listen("timer-updated", refreshSafely);
 await listen("open-github-token-settings", openGithubTokenDialog);
-await loadGithubToken();
-await refresh();
-await refreshGithubTaskStates();
+
+// Surface a failed schema update before loading, then load anyway so whatever
+// still works is available.
+await checkDatabaseStatus();
+
+try {
+  await loadGithubToken();
+  await refresh();
+  await refreshGithubTaskStates();
+} catch (error) {
+  console.error(error);
+}
